@@ -12,7 +12,7 @@ jobs:
   control-self-test:
     name: Release-control code self-test
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -58,5 +58,275 @@ jobs:
           print("P1_RELEASE_CONTROL_TEXT_TREE_VALID")
           PY
 
-      - name: Exercise trusted-base guard self-test
-        run: python3 scripts/release_guard.py --self-test
+      - name: Exercise Python release-control self-tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release_guard.py --self-test
+          python3 scripts/publish_preflight.py --self-test
+          python3 scripts/ghcr_cleanup.py --self-test
+          python3 -m py_compile \
+            scripts/release_guard.py \
+            scripts/publish_preflight.py \
+            scripts/ghcr_cleanup.py
+
+      - name: Exercise restricted VPS wrapper parser
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n ops/p1-react-staging-deploy.sh
+          bash ops/p1-react-staging-deploy.sh --self-test
+
+      - name: Parse every workflow as YAML
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e '
+            require "yaml"
+            Dir[".github/workflows/*.{yml,yaml}"].sort.each do |path|
+              value = YAML.safe_load(File.read(path), permitted_classes: [], aliases: false)
+              raise "workflow is not a mapping: #{path}" unless value.is_a?(Hash)
+              puts "YAML_OK #{path}"
+            end
+          '
+
+      - name: Enforce workflow residue and runner policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          import re
+
+          checkout = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+          forbidden = (
+              "actions/" + "cache@",
+              "actions/" + "upload-artifact@",
+              "actions/" + "download-artifact@",
+              "self" + "-hosted",
+              "docker system" + " prune",
+              "docker image" + " prune -a",
+              "docker volume" + " prune",
+              "docker compose" + " down",
+          )
+
+          for path in sorted(pathlib.Path(".github/workflows").glob("*.y*ml")):
+              text = path.read_text("utf-8")
+              for token in forbidden:
+                  if token in text:
+                      raise SystemExit(f"forbidden workflow token {token!r} in {path}")
+              for match in re.finditer(r"^\s*uses:\s*([^\s#]+)", text, re.MULTILINE):
+                  value = match.group(1)
+                  if value != checkout:
+                      raise SystemExit(f"unapproved or unpinned Action {value!r} in {path}")
+
+          publish = pathlib.Path(".github/workflows/publish-staging.yml").read_text("utf-8")
+          cleanup = pathlib.Path(".github/workflows/ghcr-cleanup.yml").read_text("utf-8")
+
+          expected_environment_counts = {
+              "publish p1-source-build": (
+                  publish.count("\n    environment: p1-source-build\n"),
+                  1,
+              ),
+              "publish p1-vps-deploy": (
+                  publish.count("\n    environment: p1-vps-deploy\n"),
+                  2,
+              ),
+              "cleanup p1-vps-deploy": (
+                  cleanup.count("\n    environment: p1-vps-deploy\n"),
+                  1,
+              ),
+          }
+          for label, (actual, expected) in expected_environment_counts.items():
+              if actual != expected:
+                  raise SystemExit(
+                      f"unexpected environment reference count for {label}: "
+                      f"expected {expected}, got {actual}"
+                  )
+
+          build_only_tokens = (
+              "\n      source_sha:\n"
+              '        description: "Exact current refs/heads/ai-dev SHA for build-only"\n'
+              "        required: true\n"
+              "        type: string\n",
+              'DISPATCH_SOURCE_SHA: ${{ inputs.source_sha }}',
+              '[[ "$DISPATCH_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]',
+              '--bootstrap-source-sha "$BOOTSTRAP_SOURCE_SHA"',
+              'candidate_tag": f"bootstrap-sha-',
+          )
+          combined = publish + "\n" + pathlib.Path(
+              "scripts/publish_preflight.py"
+          ).read_text("utf-8")
+          for token in build_only_tokens:
+              if token not in combined:
+                  raise SystemExit(f"missing explicit build-only source contract: {token}")
+
+          if "\n  schedule:\n" not in cleanup:
+              raise SystemExit("GHCR cleanup must retain its scheduled trigger")
+
+          shared_group = "group: p1-react-staging-release-mutation"
+          for label, workflow in (("publish", publish), ("cleanup", cleanup)):
+              if workflow.count(shared_group) != 1:
+                  raise SystemExit(f"{label} workflow must use the exact shared concurrency group")
+              if workflow.count("cancel-in-progress: false") != 1:
+                  raise SystemExit(f"{label} workflow must serialize without cancellation")
+
+          privacy_tokens = (
+              "Prove GHCR package privacy before candidate push",
+              "P1_GHCR_PACKAGE_PRIVATE_PRE_PUSH",
+              "P1_GHCR_PACKAGE_ABSENT_BOOTSTRAP_ALLOWED",
+              "GHCR_PACKAGE_ABSENT_BOOTSTRAP_REQUIRED",
+              'event_name == "workflow_dispatch"',
+          )
+          for token in privacy_tokens:
+              if token not in publish:
+                  raise SystemExit(f"missing pre-push GHCR privacy contract: {token}")
+          if publish.index("Prove GHCR package privacy before candidate push") > publish.index("docker buildx build"):
+              raise SystemExit("GHCR privacy gate must run before the first candidate push")
+
+          identity_tokens = (
+              '"release_identity": f"staging-seq-{sequence}"',
+              '"release_identity": f"bootstrap-sha-{source_sha}"',
+              'release_identity: ${{ steps.source.outputs.release_identity }}',
+              '--label "io.proizvodstvo1.release.identity=$RELEASE_IDENTITY"',
+              'index .Config.Labels "io.proizvodstvo1.release.identity"',
+              '[[ "$identity" == "$RELEASE_IDENTITY" ]]',
+          )
+          for token in identity_tokens:
+              if token not in combined:
+                  raise SystemExit(f"missing unique release identity contract: {token}")
+
+          def step_block(workflow: str, name: str) -> str:
+              marker = f"      - name: {name}\n"
+              start = workflow.index(marker)
+              end = workflow.find("\n      - name: ", start + len(marker))
+              return workflow[start:] if end < 0 else workflow[start:end]
+
+          source_step = step_block(
+              publish, "Prove current ai-dev and freeze immutable source archive"
+          )
+          application_step = step_block(
+              publish, "Repeat application gates only inside isolated test snapshot"
+          )
+          materialize_step = step_block(
+              publish, "Materialize untouched build snapshot after tests"
+          )
+          build_step = step_block(publish, "Build and push exact immutable candidate")
+          runtime_step = step_block(
+              publish, "Pull candidate and verify release image revision and health"
+          )
+          cleanup_step = step_block(publish, "Always clean ephemeral build state")
+
+          public_log_tokens = (
+              (source_step, 'private-source-preparation.log'),
+              (source_step, 'PRIVATE_SOURCE_TREE_UNSUPPORTED_ENTRY'),
+              (application_step, 'private-application-gates.log'),
+              (application_step, 'docker run --rm'),
+              (application_step, '> "$private_log" 2>&1'),
+              (materialize_step, 'private-build-materialize.log'),
+              (materialize_step, '> "$private_log" 2>&1'),
+              (build_step, 'private-buildkit.log'),
+              (build_step, 'docker buildx build'),
+              (build_step, '> "$private_log" 2>&1'),
+              (runtime_step, 'docker pull "$IMAGE" > "$pull_log" 2>&1'),
+              (runtime_step, 'docker logs "$SMOKE_CONTAINER" >> "$runtime_log" 2>&1'),
+              (runtime_step, 'P1_PRIVATE_IMAGE_HEALTH'),
+              (cleanup_step, '$GITHUB_WORKSPACE/source-checkout'),
+              (cleanup_step, 'private-source-preparation.log'),
+              (cleanup_step, 'private-application-gates.log'),
+              (cleanup_step, 'private-buildkit.log'),
+              (cleanup_step, 'private-candidate-pull.log'),
+              (cleanup_step, 'private-image-runtime.log'),
+          )
+          for block, token in public_log_tokens:
+              if token not in block:
+                  raise SystemExit(f"missing private-log redaction/cleanup contract: {token}")
+          if 'docker logs "$SMOKE_CONTAINER" >&2' in publish:
+              raise SystemExit("raw private runtime logs remain public")
+          if "source snapshot rejects symlink/submodule entry:" in publish:
+              raise SystemExit("private source-tree rejection still prints a path")
+          if publish.count("_LOG_BYTES=") < 4 or publish.count("_LOG_SHA256=") < 4:
+              raise SystemExit("private diagnostic logs must expose hash/byte evidence only")
+
+          wrapper = pathlib.Path("ops/p1-react-staging-deploy.sh").read_text("utf-8")
+          deprecated_restore = "restore_previous_portal_best" + "_effort"
+          if deprecated_restore in wrapper:
+              raise SystemExit("silent best-effort portal restore remains")
+          restore_tokens = (
+              "restore_previous_portal_verified",
+              'restored_env" == "$previous"',
+              'restored_image" == "$previous"',
+              'check_health "$restored_id"',
+              'restored_nginx" == "$expected_nginx"',
+              "APPLY_FAILED_PREVIOUS_VERIFIED",
+              "APPLY_FAILED_RECOVERY_REQUIRED",
+              'append_ledger recovery-required deploy "$image"',
+              'fail "PENDING_RECOVERY_REQUIRED:',
+              '"$configured_image" == "$PENDING_IMAGE" && "$current_live" == "$CURRENT_IMAGE"',
+              '"$configured_image" == "$CURRENT_IMAGE" && "$current_live" == "$PENDING_IMAGE"',
+          )
+          for token in restore_tokens:
+              if token not in wrapper:
+                  raise SystemExit(f"missing verified restore/recovery contract: {token}")
+
+          case_start = wrapper.index('case "$action" in')
+          deploy_start = wrapper.index("\n  deploy)\n", case_start)
+          commit_start = wrapper.index("\n  commit)\n", deploy_start)
+          rollback_start = wrapper.index("\n  rollback)\n", commit_start)
+          deploy_block = wrapper[deploy_start:commit_start]
+          recovery_marker = deploy_block.index('"$APPLY_FAILED_RECOVERY_REQUIRED"|*)')
+          recovery_block = deploy_block[recovery_marker:deploy_block.index("    esac", recovery_marker)]
+          if 'PENDING_IMAGE=""' in recovery_block or 'remove_exact_image "$image"' in recovery_block:
+              raise SystemExit("recovery-required path destroys pending evidence")
+
+          normal_deploy = deploy_block[deploy_block.index("disk_guard || fail"):]
+          pending_before_pull = normal_deploy.index('PENDING_IMAGE="$image"')
+          pending_save = normal_deploy.index("save_state", pending_before_pull)
+          pull_image = normal_deploy.index(
+              'docker --config "$DOCKER_CONFIG_DIR" pull "$image"'
+          )
+          if not pending_before_pull < pending_save < pull_image:
+              raise SystemExit("pending state must be durable before exact image pull")
+
+          pull_failure = normal_deploy[
+              normal_deploy.index('if ! docker --config "$DOCKER_CONFIG_DIR" pull "$image"'):
+              normal_deploy.index("if apply_live_image")
+          ]
+          pending_clear = pull_failure.index('PENDING_IMAGE=""')
+          blocked_set = pull_failure.index('BLOCKED_IMAGE="$image"')
+          blocked_save = pull_failure.index("save_state", blocked_set)
+          blocked_delete = pull_failure.index('remove_exact_image "$image"')
+          if not pending_clear < blocked_set < blocked_save < blocked_delete:
+              raise SystemExit("pull failure must durably block candidate before deletion")
+
+          private_config_tokens = (
+              "require_private_root_file",
+              '(8#$mode & 0077)',
+              'require_private_root_file "$DOCKER_CONFIG_DIR/config.json"',
+          )
+          for token in private_config_tokens:
+              if token not in wrapper:
+                  raise SystemExit(f"missing private Docker config mode contract: {token}")
+          if 'cat "$DOCKER_CONFIG_DIR/config.json"' in wrapper:
+              raise SystemExit("Docker credential content must never be printed")
+
+          commit_block = wrapper[commit_start:rollback_start]
+          durable_marker = commit_block.index("Durably commit the new ring before exact outgoing deletion")
+          durable_save = commit_block.index("save_state", durable_marker)
+          outgoing_delete = commit_block.index('remove_exact_image "$outgoing"')
+          if not durable_marker < durable_save < outgoing_delete:
+              raise SystemExit("new ring state must be durable before outgoing deletion")
+
+          atomic_tokens = (
+              'realpath -e -- "$parent"',
+              'realpath -e -- "$target"',
+              'mktemp "$IMAGE_ENV_PARENT/.p1tmp.image-env.XXXXXX"',
+              'mv -f -- "$ACTIVE_TMP" "$STAGING_IMAGE_ENV"',
+              "-name '.p1tmp.image-env.*' -mmin +1440 -delete",
+          )
+          for token in atomic_tokens:
+              if token not in wrapper:
+                  raise SystemExit(f"missing atomic image-env contract: {token}")
+
+          print("P1_RELEASE_CONTROL_WORKFLOW_POLICY_VALID")
+          PY

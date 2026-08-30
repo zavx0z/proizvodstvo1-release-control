@@ -1,0 +1,127 @@
+name: GHCR cleanup
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: p1-react-staging-release-mutation
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Bounded GHCR cleanup
+    if: vars.P1_STAGING_MAINTENANCE_ENABLED == 'true'
+    environment: p1-vps-deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      VPS_HOST: ${{ vars.P1_VPS_DEPLOY_HOST }}
+      VPS_USER: ${{ vars.P1_VPS_DEPLOY_USER }}
+
+    steps:
+      - name: Require restricted VPS read state credentials
+        shell: bash
+        env:
+          VPS_KEY: ${{ secrets.P1_VPS_DEPLOY_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.P1_VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ -n "$VPS_KEY" ]] || { echo "P1_VPS_DEPLOY_KEY is missing" >&2; exit 1; }
+          [[ -n "$VPS_KNOWN_HOSTS" ]] || { echo "P1_VPS_KNOWN_HOSTS is missing" >&2; exit 1; }
+          [[ "$VPS_HOST" =~ ^[A-Za-z0-9._:-]+$ ]] || { echo "invalid P1_VPS_DEPLOY_HOST" >&2; exit 1; }
+          [[ "$VPS_USER" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid P1_VPS_DEPLOY_USER" >&2; exit 1; }
+
+      - name: Checkout exact protected control code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install ephemeral restricted VPS SSH material
+        id: ssh
+        shell: bash
+        env:
+          VPS_KEY: ${{ secrets.P1_VPS_DEPLOY_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.P1_VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/p1-vps-deploy-key"
+          known="$RUNNER_TEMP/p1-vps-known-hosts"
+          printf '%s\n' "$VPS_KEY" > "$key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$known"
+          chmod 0600 "$key" "$known"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "known_hosts=$known" >> "$GITHUB_OUTPUT"
+
+      - name: Query VPS state and protect all retained or pending GHCR digests
+        shell: bash
+        env:
+          SSH_KEY: ${{ steps.ssh.outputs.key }}
+          KNOWN_HOSTS: ${{ steps.ssh.outputs.known_hosts }}
+        run: |
+          set -euo pipefail
+          state="$RUNNER_TEMP/vps-state.txt"
+          protected="$RUNNER_TEMP/protected.txt"
+          ssh \
+            -i "$SSH_KEY" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$KNOWN_HOSTS" \
+            -- "$VPS_USER@$VPS_HOST" state > "$state"
+          cat "$state"
+          python3 - "$state" "$protected" <<'PY'
+          import pathlib, re, sys
+          source = pathlib.Path(sys.argv[1])
+          target = pathlib.Path(sys.argv[2])
+          allowed_keys = {"STATUS", "LIVE_IMAGE", "CURRENT_IMAGE", "ROLLBACK_IMAGE", "SAFETY_IMAGE", "PENDING_IMAGE", "BLOCKED_IMAGE"}
+          values = {}
+          for line in source.read_text("utf-8").splitlines():
+              if not line:
+                  continue
+              key, sep, value = line.partition("=")
+              if not sep or key not in allowed_keys or key in values:
+                  raise SystemExit(f"unexpected VPS state line: {line!r}")
+              values[key] = value
+          if values.get("STATUS") != "ok":
+              raise SystemExit("VPS state did not return STATUS=ok")
+          image_re = re.compile(r"^ghcr\.io/zavx0z/proizvodstvo1-react-portal@sha256:[0-9a-f]{64}$")
+          result = []
+          for key in ("LIVE_IMAGE", "CURRENT_IMAGE", "ROLLBACK_IMAGE", "SAFETY_IMAGE", "PENDING_IMAGE", "BLOCKED_IMAGE"):
+              value = values.get(key, "")
+              if value.startswith("ghcr.io/"):
+                  if not image_re.fullmatch(value):
+                      raise SystemExit(f"unexpected GHCR image in {key}")
+                  result.append(value)
+          target.write_text("\n".join(sorted(set(result))) + ("\n" if result else ""), "utf-8")
+          print(f"P1_PROTECTED_GHCR_DIGESTS={len(set(result))}")
+          PY
+
+      - name: Delete only eligible exact-package versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/ghcr_cleanup.py
+          --apply
+          --protected-file "$RUNNER_TEMP/protected.txt"
+          --keep-deployed 5
+          --grace-hours 48
+          --max-delete 50
+
+      - name: Always remove ephemeral SSH material
+        if: always()
+        shell: bash
+        run: |
+          rm -f -- \
+            "$RUNNER_TEMP/p1-vps-deploy-key" \
+            "$RUNNER_TEMP/p1-vps-known-hosts" \
+            "$RUNNER_TEMP/vps-state.txt" \
+            "$RUNNER_TEMP/protected.txt"

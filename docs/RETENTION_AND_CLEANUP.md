@@ -32,14 +32,19 @@ The publish system uses GitHub-hosted ephemeral runners only.
 Rules:
 
 - all temporary SSH/key/config files live under `RUNNER_TEMP`;
-- temporary files are created with restrictive permissions and removed by `trap`;
+- SSH files are mode 0600 and removed in `if: always()` cleanup;
 - Docker login is logged out before the job ends;
-- test containers are always removed;
-- local release test images are removed by exact tag/image ID;
+- test containers use `--rm`;
+- Buildx pushes directly and does not load a persistent local release image;
 - no persistent build cache is uploaded;
-- cleanup steps use `if: always()` where necessary.
+- no workflow artifact contains application source or an OCI archive.
 
 No self-hosted build workspace is used, so checkout, `node_modules`, BuildKit state and temporary containers disappear with the GitHub-hosted VM.
+
+Private source preparation, test/build, BuildKit, pull and runtime diagnostics
+are redirected to `RUNNER_TEMP`. On failure only bytes and SHA-256 are public.
+No log content is printed or uploaded; always-cleanup removes the private source
+checkout, snapshots, archive, metadata and diagnostic logs.
 
 ## 3. Private GHCR package
 
@@ -51,22 +56,78 @@ ghcr.io/zavx0z/proizvodstvo1-react-portal
 
 Deployment always uses a full digest. Tags exist only for traceability and retention.
 
+Candidate tags:
+
+```text
+seq-<N>
+sha-<source-sha>
+bootstrap-sha-<source-sha>
+```
+
+`bootstrap-sha-<source-sha>` is allowed only with exactly 40 lowercase hex and
+is used only by explicit-SHA build-only runs. A bootstrap version has no
+`deployed-seq-*` tag and remains subject to the same 48-hour grace and bounded
+orphan cleanup rules.
+
+The final image config carries a unique bounded release identity:
+`staging-seq-<N>` or `bootstrap-sha-<source-sha>`. A repeated source SHA on a new
+normal sequence therefore produces a distinct manifest digest instead of
+accumulating unbounded sequence tags on one digest.
+
+A successfully committed deployment additionally points:
+
+```text
+deployed-seq-<N>
+```
+
+to the same immutable manifest.
+
 Retention target:
 
-- keep the 5 most recent successfully deployed versions;
+- keep the 5 most recent versions carrying a successful `deployed-seq-*` tag;
 - always keep versions younger than 48 hours as a race-safety grace window;
+- always keep every GHCR digest referenced by VPS live/current/rollback/safety/pending/blocked state;
 - failed/orphan candidate versions older than 48 hours are eligible for deletion;
-- never delete a digest referenced by current VPS state, rollback state or safety state;
+- successful deployed versions older than the newest retained five are eligible only when not referenced by VPS state;
+- never delete a version with an unknown tag shape; report `CLEANUP_BLOCKED` instead;
 - delete only versions of the exact package above;
 - cap cleanup to 50 package-version deletions per run.
 
-A cleanup workflow must run after successful publish and on a daily schedule.
+A cleanup workflow runs after successful publication and daily when `P1_STAGING_MAINTENANCE_ENABLED=true`.
 
-If the package inventory exceeds the expected bound and cleanup cannot safely reduce it, report `CLEANUP_BLOCKED` and block the next release. Do not fall back to broad deletion.
+Cleanup and publish use the same non-cancelling
+`p1-react-staging-release-mutation` concurrency group.
 
-## 4. VPS image retention
+If more than 50 eligible versions remain or any inventory entry cannot be classified safely, cleanup returns:
 
-The React staging host keeps a bounded three-image ring:
+```text
+CLEANUP_BLOCKED
+```
+
+and the next release is blocked. Do not fall back to broad deletion.
+
+## 4. Staging provenance and attestations
+
+Staging v1 deliberately publishes no separate BuildKit SBOM/provenance attestations because they can create additional untagged OCI manifests that complicate exact retention.
+
+Staging provenance is instead bounded to:
+
+```text
+release sequence
+source SHA
+release identity
+OCI revision label
+immutable image digest
+GitHub workflow result
+deployed-seq tag
+health/smoke evidence
+```
+
+Production attestation policy is a separate cutover decision.
+
+## 5. VPS committed ring
+
+The React staging host keeps a bounded committed three-image ring:
 
 ```text
 current
@@ -74,13 +135,68 @@ rollback
 safety
 ```
 
-After a successful deployment:
+The wrapper also permits at most one temporary `pending` image during a transaction and at most one `blocked` image when an exact deletion could not be proven safe.
 
-1. new image becomes `current`;
-2. old `current` becomes `rollback`;
-3. old `rollback` becomes `safety`;
-4. the previous fourth digest becomes deletion candidate;
-5. delete it only after proving it belongs to the exact React staging repository and is not referenced by any running container or one of the three retained states.
+A normal successful transaction is:
+
+```text
+A=current, B=rollback, C=safety
+
+deploy N
+  -> pending=N (durable)
+  -> pull N
+  -> live=N
+  -> committed ring remains A/B/C
+
+full GitHub smoke
+
+commit N
+  -> current=N
+  -> rollback=A
+  -> safety=B
+  -> C becomes exact deletion candidate
+```
+
+If full smoke fails before commit:
+
+```text
+rollback A
+```
+
+restores live=A and leaves the committed A/B/C ring intact. The failed pending image becomes the only exact deletion candidate.
+
+This means the safety image is never discarded before full smoke succeeds.
+
+During commit, the new ring and outgoing `BLOCKED_IMAGE` are saved durably
+before deletion. A crash leaves a consistent ring plus explicit cleanup
+evidence. Successful deletion clears blocked state and saves again.
+
+Before pull, the candidate is first saved as `PENDING_IMAGE`. A pull crash is
+therefore recoverable. A reported pull failure clears pending only while
+durably recording the exact candidate as `BLOCKED_IMAGE`; exact cleanup happens
+after that save and never falls back to broad prune.
+
+## 6. VPS exact image cleanup
+
+The outgoing image is removed only after proving:
+
+- its reference matches the allowed Proizvodstvo1 React staging repositories;
+- it is not current/rollback/safety/pending;
+- its Docker image ID is not used by any running container.
+
+If exact deletion fails or safety cannot be proven, the wrapper stores:
+
+```text
+BLOCKED_IMAGE=<exact immutable ref>
+```
+
+reports:
+
+```text
+CLEANUP_STATUS=CLEANUP_BLOCKED
+```
+
+and refuses the next deployment until that exact image can be removed safely.
 
 Never use:
 
@@ -93,21 +209,37 @@ docker compose down
 
 Do not remove unrelated images, volumes, networks, caches or containers.
 
-## 5. VPS temporary state
+## 7. VPS temporary state
 
 All release temporary files live under a dedicated root-owned release state directory.
 
 Rules:
 
 - use `mktemp` inside that directory;
-- install `trap` cleanup before mutation;
+- temp names use the `.p1tmp.*` prefix;
 - no symlink traversal;
-- stale temp cleanup is limited to files created by this release system, with expected owner/prefix, older than 24 hours;
-- if ownership/path safety cannot be proven, do not delete and return `CLEANUP_BLOCKED`.
+- stale temp cleanup is limited to root-owned regular files with that exact prefix older than 24 hours;
+- if ownership/path safety cannot be proven, do not delete and return an error.
 
-Persistent state contains only the bounded current/rollback/safety digests plus minimal release status.
+`STAGING_IMAGE_ENV` uses a separate atomic rule: its canonical target and parent
+must be root-owned, non-symlink and not group/other writable. The writer creates
+`.p1tmp.image-env.*` in that parent and uses same-filesystem `mv`; stale cleanup
+selects only root-owned regular files with that prefix.
 
-## 6. Logs
+Persistent state contains only:
+
+```text
+current
+rollback
+safety
+pending
+blocked image
+latest 100 audit ledger lines
+```
+
+The ledger is truncated to the most recent 100 records after every write.
+
+## 8. Logs
 
 React staging container logs must use bounded Docker log rotation. Target contract:
 
@@ -118,11 +250,13 @@ max-file: 5
 
 Existing staging Nginx and central ingress logging are outside ordinary application publish. Their retention must be checked read-only before automation is enabled; changes require a separate infrastructure task.
 
-## 7. Disk guard
+## 9. Disk guard
 
-Before pulling or importing a new staging image, check free space.
+Before pulling a new staging image, the root-owned wrapper checks free space against the fixed `MIN_FREE_KB` configured outside GitHub.
 
-If the configured free-space threshold is not met:
+`MIN_FREE_KB` must be at least 1 GiB; the installation task should choose a larger operational threshold based on the real VPS disk baseline.
+
+If the threshold is not met:
 
 ```text
 DISK_GUARD_BLOCKED
@@ -130,21 +264,21 @@ DISK_GUARD_BLOCKED
 
 No deployment starts and no global prune is attempted.
 
-## 8. Cleanup evidence
+## 10. Cleanup evidence
 
-Every successful release report must include:
+Every successful release report must include, without secrets:
 
 ```text
 GHCR versions before/after
 GHCR digests retained
 affected GHCR version IDs
 VPS current/rollback/safety digests
+VPS pending/blocked state
 exact VPS image removed, if any
 temporary-state cleanup result
-disk free before/after
-cleanup status
+disk free before deployment
+GHCR cleanup status
+VPS cleanup status
 ```
 
-Secrets and credentials are never printed.
-
-A release is not considered complete until cleanup status is `OK`.
+A release is not considered complete until both GHCR and VPS cleanup statuses are `OK`.
