@@ -16,17 +16,37 @@ fail() {
 valid_target() { [[ "$1" =~ $TARGET_RE ]]; }
 valid_known_image() { [[ "$1" =~ $TARGET_RE || "$1" =~ $LEGACY_RE ]]; }
 
+next_ring() {
+  local current="$1" rollback="$2" safety="$3" pending="$4"
+  if [[ "$pending" == "$current" ]]; then
+    printf '%s\n%s\n%s\n%s\n' "$current" "$rollback" "$safety" ""
+  else
+    printf '%s\n%s\n%s\n%s\n' "$pending" "$current" "$rollback" "$safety"
+  fi
+}
+
 self_test() {
-  valid_target "ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'a%.0s' {1..64})"
+  local a b c n action image extra
+  a="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'a%.0s' {1..64})"
+  b="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'b%.0s' {1..64})"
+  c="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'c%.0s' {1..64})"
+  n="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'd%.0s' {1..64})"
+
+  valid_target "$a"
   ! valid_target "ghcr.io/zavx0z/other@sha256:$(printf 'a%.0s' {1..64})"
-  valid_known_image "10.66.0.10:5000/platform/proizvodstvo1-react-portal@sha256:$(printf 'b%.0s' {1..64})"
+  valid_known_image "10.66.0.10:5000/platform/proizvodstvo1-react-portal@sha256:$(printf 'e%.0s' {1..64})"
   ! valid_known_image "ubuntu:latest"
 
-  local action image extra
-  IFS=' ' read -r action image extra <<< "deploy ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'c%.0s' {1..64})"
-  [[ "$action" == deploy && -n "$image" && -z "${extra:-}" ]]
+  IFS=' ' read -r action image extra <<< "deploy $n"
+  [[ "$action" == deploy && "$image" == "$n" && -z "${extra:-}" ]]
   IFS=' ' read -r action image extra <<< "state"
   [[ "$action" == state && -z "${image:-}" && -z "${extra:-}" ]]
+
+  mapfile -t ring < <(next_ring "$a" "$b" "$c" "$n")
+  [[ "${ring[0]}" == "$n" && "${ring[1]}" == "$a" && "${ring[2]}" == "$b" && "${ring[3]}" == "$c" ]]
+  mapfile -t ring < <(next_ring "$a" "$b" "$c" "$a")
+  [[ "${ring[0]}" == "$a" && "${ring[1]}" == "$b" && "${ring[2]}" == "$c" && -z "${ring[3]}" ]]
+
   echo "P1_VPS_DEPLOY_WRAPPER_SELF_TEST_VALID"
 }
 
@@ -76,6 +96,7 @@ source "$CONFIG_FILE"
 
 require_root_file "$STAGING_COMPOSE_FILE"
 require_root_file "$STAGING_RUNTIME_ENV"
+require_root_file "$STAGING_IMAGE_ENV"
 require_root_dir "$DOCKER_CONFIG_DIR"
 require_root_file "$DOCKER_CONFIG_DIR/config.json"
 
@@ -92,6 +113,17 @@ command -v docker >/dev/null 2>&1 || fail "docker is required"
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v flock >/dev/null 2>&1 || fail "flock is required"
 command -v find >/dev/null 2>&1 || fail "find is required"
+
+ACTIVE_TMP=""
+cleanup_active_tmp() {
+  if [[ -n "$ACTIVE_TMP" ]]; then
+    rm -f -- "$ACTIVE_TMP" || true
+    ACTIVE_TMP=""
+  fi
+}
+trap cleanup_active_tmp EXIT
+trap 'cleanup_active_tmp; exit 130' INT
+trap 'cleanup_active_tmp; exit 143' TERM
 
 compose=(
   docker compose
@@ -128,33 +160,40 @@ load_state() {
 }
 
 save_state() {
-  local tmp
-  tmp="$(mktemp "$STATE_DIR/.p1tmp.state.XXXXXX")"
-  trap 'rm -f -- "$tmp"' RETURN
+  ACTIVE_TMP="$(mktemp "$STATE_DIR/.p1tmp.state.XXXXXX")"
   {
     printf 'CURRENT_IMAGE=%q\n' "$CURRENT_IMAGE"
     printf 'ROLLBACK_IMAGE=%q\n' "$ROLLBACK_IMAGE"
     printf 'SAFETY_IMAGE=%q\n' "$SAFETY_IMAGE"
     printf 'PENDING_IMAGE=%q\n' "$PENDING_IMAGE"
     printf 'BLOCKED_IMAGE=%q\n' "$BLOCKED_IMAGE"
-  } > "$tmp"
-  chmod 0640 "$tmp"
-  chown root:root "$tmp"
-  mv -f -- "$tmp" "$STATE_FILE"
-  trap - RETURN
+  } > "$ACTIVE_TMP"
+  chmod 0640 "$ACTIVE_TMP"
+  chown root:root "$ACTIVE_TMP"
+  mv -f -- "$ACTIVE_TMP" "$STATE_FILE"
+  ACTIVE_TMP=""
+}
+
+image_env_value() {
+  local count value
+  count="$(grep -c '^PROIZVODSTVO1_REACT_STAGING_IMAGE=' "$STAGING_IMAGE_ENV" || true)"
+  [[ "$count" == 1 ]] || fail "STAGING_IMAGE_ENV must contain exactly one image assignment"
+  [[ "$(grep -cvE '^(PROIZVODSTVO1_REACT_STAGING_IMAGE=|[[:space:]]*$)' "$STAGING_IMAGE_ENV" || true)" == 0 ]] || fail "STAGING_IMAGE_ENV contains unexpected content"
+  value="$(sed -n 's/^PROIZVODSTVO1_REACT_STAGING_IMAGE=//p' "$STAGING_IMAGE_ENV")"
+  valid_known_image "$value" || fail "STAGING_IMAGE_ENV contains unknown image"
+  printf '%s\n' "$value"
 }
 
 write_image_env() {
-  local image="$1" tmp
+  local image="$1"
   valid_known_image "$image" || fail "refusing unknown image for image env"
-  tmp="$(mktemp "$STATE_DIR/.p1tmp.image-env.XXXXXX")"
-  trap 'rm -f -- "$tmp"' RETURN
-  printf 'PROIZVODSTVO1_REACT_STAGING_IMAGE=%s\n' "$image" > "$tmp"
-  chmod 0640 "$tmp"
-  chown root:root "$tmp"
-  install -m 0640 -o root -g root "$tmp" "$STAGING_IMAGE_ENV"
-  rm -f -- "$tmp"
-  trap - RETURN
+  ACTIVE_TMP="$(mktemp "$STATE_DIR/.p1tmp.image-env.XXXXXX")"
+  printf 'PROIZVODSTVO1_REACT_STAGING_IMAGE=%s\n' "$image" > "$ACTIVE_TMP"
+  chmod 0640 "$ACTIVE_TMP"
+  chown root:root "$ACTIVE_TMP"
+  install -m 0640 -o root -g root "$ACTIVE_TMP" "$STAGING_IMAGE_ENV"
+  rm -f -- "$ACTIVE_TMP"
+  ACTIVE_TMP=""
 }
 
 portal_id() { "${compose[@]}" ps -q "$PORTAL_SERVICE"; }
@@ -223,43 +262,51 @@ remove_exact_image() {
 }
 
 append_ledger() {
-  local status="$1" action="$2" image="$3" tmp
-  printf '%s\taction=%s\tstatus=%s\timage=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$action" "$status" "$image" >> "$LEDGER_FILE"
-  chmod 0640 "$LEDGER_FILE"
-  chown root:root "$LEDGER_FILE"
-  tmp="$(mktemp "$STATE_DIR/.p1tmp.ledger.XXXXXX")"
-  tail -n 100 "$LEDGER_FILE" > "$tmp"
-  chmod 0640 "$tmp"
-  chown root:root "$tmp"
-  mv -f -- "$tmp" "$LEDGER_FILE"
+  local status="$1" action="$2" image="$3" line
+  line="$(printf '%s\taction=%s\tstatus=%s\timage=%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$action" "$status" "$image")"
+  ACTIVE_TMP="$(mktemp "$STATE_DIR/.p1tmp.ledger.XXXXXX")"
+  if [[ -f "$LEDGER_FILE" ]]; then
+    require_root_file "$LEDGER_FILE"
+    tail -n 99 "$LEDGER_FILE" > "$ACTIVE_TMP"
+  fi
+  printf '%s\n' "$line" >> "$ACTIVE_TMP"
+  chmod 0640 "$ACTIVE_TMP"
+  chown root:root "$ACTIVE_TMP"
+  mv -f -- "$ACTIVE_TMP" "$LEDGER_FILE"
+  ACTIVE_TMP=""
 }
 
 apply_live_image() {
-  local image="$1" previous="$2" before_nginx after_nginx new_id
+  local image="$1" previous="$2" before_nginx after_nginx new_id restored
+  valid_known_image "$image" || fail "apply target is outside allowed repositories"
+  valid_known_image "$previous" || fail "restore target is outside allowed repositories"
   before_nginx="$(nginx_id)"
   [[ -n "$before_nginx" ]] || fail "staging Nginx container is missing"
+
   write_image_env "$image"
   if ! "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null; then
     write_image_env "$previous"
     "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null 2>&1 || true
     return 1
   fi
+
   new_id="$(portal_id)"
   [[ -n "$new_id" ]] || return 1
   if ! check_health "$new_id"; then
     write_image_env "$previous"
     "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null 2>&1 || true
-    local restored
     restored="$(portal_id)"
     [[ -n "$restored" ]] && check_health "$restored" >/dev/null 2>&1 || true
     return 1
   fi
+
   after_nginx="$(nginx_id)"
-  [[ "$after_nginx" == "$before_nginx" ]] || {
+  if [[ "$after_nginx" != "$before_nginx" ]]; then
     write_image_env "$previous"
     "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null 2>&1 || true
     fail "staging Nginx container changed during portal update"
-  }
+  fi
+
   echo "PORTAL_CONTAINER_AFTER=$new_id"
   echo "STAGING_NGINX_CONTAINER=$after_nginx"
 }
@@ -267,6 +314,9 @@ apply_live_image() {
 load_state
 current_live="$(live_image)"
 valid_known_image "$current_live" || fail "live portal image is outside allowed repositories: $current_live"
+configured_image="$(image_env_value)"
+[[ "$configured_image" == "$current_live" ]] || fail "STAGING_IMAGE_ENV does not match live portal image"
+
 if [[ -z "$CURRENT_IMAGE" ]]; then
   CURRENT_IMAGE="$current_live"
   save_state
@@ -293,6 +343,7 @@ case "$action" in
     [[ -n "${image:-}" ]] || fail "deploy requires image"
     valid_target "$image" || fail "deploy accepts only immutable target GHCR image"
     [[ -z "$PENDING_IMAGE" ]] || fail "PENDING_RECOVERY_REQUIRED"
+
     if [[ -n "$BLOCKED_IMAGE" ]]; then
       if remove_exact_image "$BLOCKED_IMAGE"; then
         BLOCKED_IMAGE=""
@@ -301,7 +352,22 @@ case "$action" in
         fail "CLEANUP_BLOCKED: previous VPS image cannot be safely removed"
       fi
     fi
+
     [[ "$current_live" == "$CURRENT_IMAGE" ]] || fail "live image does not match committed current state"
+
+    if [[ "$image" == "$CURRENT_IMAGE" ]]; then
+      check_health "$(portal_id)" || fail "current no-op image is not healthy"
+      PENDING_IMAGE="$image"
+      save_state
+      append_ledger pending-noop deploy "$image"
+      echo "STATUS=pending"
+      echo "CURRENT_IMAGE=$CURRENT_IMAGE"
+      echo "ROLLBACK_IMAGE=$CURRENT_IMAGE"
+      echo "SAFETY_IMAGE=$SAFETY_IMAGE"
+      echo "PENDING_IMAGE=$PENDING_IMAGE"
+      exit 0
+    fi
+
     disk_guard || fail "DISK_GUARD_BLOCKED"
     docker --config "$DOCKER_CONFIG_DIR" pull "$image" >/dev/null || fail "target image pull failed"
     apply_live_image "$image" "$CURRENT_IMAGE" || fail "new portal did not become healthy; previous current restored"
@@ -320,17 +386,38 @@ case "$action" in
     valid_target "$image" || fail "commit accepts only target GHCR image"
     [[ "$PENDING_IMAGE" == "$image" ]] || fail "commit image does not match pending image"
     [[ "$current_live" == "$PENDING_IMAGE" ]] || fail "live image does not match pending image"
-    outgoing="$SAFETY_IMAGE"
-    SAFETY_IMAGE="$ROLLBACK_IMAGE"
-    ROLLBACK_IMAGE="$CURRENT_IMAGE"
-    CURRENT_IMAGE="$PENDING_IMAGE"
+
+    if [[ "$PENDING_IMAGE" == "$CURRENT_IMAGE" ]]; then
+      PENDING_IMAGE=""
+      save_state
+      append_ledger ok commit-noop "$image"
+      echo "CLEANUP_STATUS=OK"
+      echo "STATUS=ok"
+      echo "CURRENT_IMAGE=$CURRENT_IMAGE"
+      echo "ROLLBACK_IMAGE=$ROLLBACK_IMAGE"
+      echo "SAFETY_IMAGE=$SAFETY_IMAGE"
+      echo "BLOCKED_IMAGE=$BLOCKED_IMAGE"
+      exit 0
+    fi
+
+    mapfile -t ring < <(next_ring "$CURRENT_IMAGE" "$ROLLBACK_IMAGE" "$SAFETY_IMAGE" "$PENDING_IMAGE")
+    new_current="${ring[0]}"
+    new_rollback="${ring[1]}"
+    new_safety="${ring[2]}"
+    outgoing="${ring[3]}"
+
+    CURRENT_IMAGE="$new_current"
+    ROLLBACK_IMAGE="$new_rollback"
+    SAFETY_IMAGE="$new_safety"
     PENDING_IMAGE=""
     BLOCKED_IMAGE=""
+
     if [[ -n "$outgoing" ]]; then
       if ! remove_exact_image "$outgoing"; then
         BLOCKED_IMAGE="$outgoing"
       fi
     fi
+
     save_state
     if [[ -n "$BLOCKED_IMAGE" ]]; then
       append_ledger cleanup-blocked commit "$image"
@@ -351,9 +438,24 @@ case "$action" in
     valid_known_image "$image" || fail "rollback image is outside allowed repositories"
     [[ -n "$PENDING_IMAGE" ]] || fail "there is no pending deployment to roll back"
     [[ "$image" == "$CURRENT_IMAGE" ]] || fail "rollback target must equal committed current image"
+
     failed_image="$PENDING_IMAGE"
     live_now="$(live_image)"
     [[ "$live_now" == "$PENDING_IMAGE" ]] || fail "live image no longer matches pending image"
+
+    if [[ "$PENDING_IMAGE" == "$CURRENT_IMAGE" ]]; then
+      PENDING_IMAGE=""
+      save_state
+      append_ledger rollback-noop rollback "$failed_image"
+      echo "STATUS=ok"
+      echo "CLEANUP_STATUS=OK"
+      echo "CURRENT_IMAGE=$CURRENT_IMAGE"
+      echo "ROLLBACK_IMAGE=$ROLLBACK_IMAGE"
+      echo "SAFETY_IMAGE=$SAFETY_IMAGE"
+      echo "BLOCKED_IMAGE=$BLOCKED_IMAGE"
+      exit 0
+    fi
+
     apply_live_image "$CURRENT_IMAGE" "$PENDING_IMAGE" || fail "rollback failed"
     PENDING_IMAGE=""
     if remove_exact_image "$failed_image"; then
