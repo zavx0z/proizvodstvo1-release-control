@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "environment": "staging",
+  "source_repository": "zavx0z/proizvodstvo1",
+  "source_ref": "refs/heads/ai-dev",
+  "source_sha": "657b77d5839385775b0c1a43d2621a0ce9c3a628",
+  "sequence": 1,
+  "requested_at": "2026-08-30T00:00:00Z",
+  "summary": "Bootstrap baseline matching the current live staging source; no deployment requested."
+}
