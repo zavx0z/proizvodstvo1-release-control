@@ -218,6 +218,12 @@ The workflow verifies this label after pull together with the OCI revision. A
 new sequence therefore gets a distinct manifest digest even when source SHA is
 reused.
 
+Private source preparation, application tests/build, BuildKit, candidate pull
+and runtime command output is suppressed into `RUNNER_TEMP`. Public failure
+evidence contains only a generic stage marker plus hidden-log bytes and SHA-256.
+Private logs and source/build snapshots are deleted in always-cleanup and never
+uploaded.
+
 After a successful committed deployment, the finalize job adds:
 
 ```text
@@ -281,11 +287,11 @@ The committed ring is not rotated until the protected full smoke succeeds:
 
 ```text
 deploy IMAGE
-  -> pull exact digest
   -> disk guard
+  -> record pending durably
+  -> pull exact digest
   -> update portal only
   -> health
-  -> record pending
 
 trusted public-control full smoke
 
@@ -322,6 +328,15 @@ A missing portal fails closed. Commit saves the new ring and outgoing
 `BLOCKED_IMAGE` before deletion, then clears blocked state in a second save only
 after successful exact deletion. Image-env replacement uses a same-directory
 atomic `mv` after canonical root-owned non-symlink path checks.
+
+Normal deploy saves `PENDING_IMAGE=<candidate>` before `docker pull`. A crash
+during pull therefore leaves explicit recovery evidence. A reported pull
+failure durably moves the candidate to `BLOCKED_IMAGE` before attempting exact
+deletion; successful cleanup clears it in a second save, while failure returns
+`CLEANUP_BLOCKED`.
+
+The VPS pull-only Docker config is required to be regular, non-symlink,
+root-owned and private (`mode & 0077 == 0`). Its contents are never emitted.
 
 ## 11. Trusted full smoke
 

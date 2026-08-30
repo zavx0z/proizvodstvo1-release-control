@@ -49,6 +49,10 @@ EXTERNAL_HEALTH_URL=https://staging.proizvodstvo1.ru/health
 
 `DOCKER_CONFIG_DIR/config.json` contains a pull-only GHCR credential for only the private `proizvodstvo1-react-portal` package. Credential material is not committed or printed.
 
+The wrapper enforces that this file is regular, non-symlink, root-owned and has
+no group/other permissions (`mode & 0077 == 0`). Its parent remains root-owned
+and not group/other writable.
+
 `STAGING_IMAGE_ENV` is a root-owned one-line file:
 
 ```text
@@ -65,11 +69,18 @@ Before automation is enabled, Codex must prove the existing fixed staging Compos
 
 The wrapper deliberately separates deployment into three phases:
 
-1. `deploy IMAGE` pulls and starts IMAGE, verifies container health and `/health`, and records it as `PENDING_IMAGE`. It does not rotate or delete the committed rollback ring.
+1. `deploy IMAGE` records `PENDING_IMAGE` durably, then pulls and starts IMAGE
+   and verifies container health and `/health`. It does not rotate or delete the
+   committed rollback ring.
 2. GitHub performs the full external staging smoke.
 3. `commit IMAGE` finalizes the ring only after smoke succeeds. If smoke fails, `rollback PREVIOUS_CURRENT` restores the previous committed image and discards the failed pending candidate.
 
 A runner crash after `deploy` leaves an explicit pending state. A later deployment is blocked with `PENDING_RECOVERY_REQUIRED` instead of silently overwriting evidence.
+
+For normal deploy, `PENDING_IMAGE` is saved before the exact image pull. If pull
+fails, pending is durably transitioned to exact `BLOCKED_IMAGE` before deletion;
+cleanup success clears blocked state in a second save, while cleanup failure
+returns `CLEANUP_BLOCKED`.
 
 Failed apply clears pending state and deletes the candidate only after proving
 the previous image-env, live image, internal/external health and unchanged

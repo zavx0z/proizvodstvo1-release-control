@@ -107,6 +107,12 @@ Manual review caught and corrected these issues before merge:
     absent package.
 11. Every image carries a verified sequence/bootstrap release identity.
 12. Publish and scheduled cleanup share one non-cancelling concurrency boundary.
+13. Public Actions suppress private source/test/build/runtime log contents and
+    expose only generic status plus diagnostic bytes/SHA-256 on failure.
+14. VPS pending state is durable before image pull; pull failure transitions
+    through durable exact blocked cleanup evidence.
+15. VPS Docker pull credentials require root ownership and no group/other mode
+    bits, with contents never printed.
 
 ## External setup is still absent
 

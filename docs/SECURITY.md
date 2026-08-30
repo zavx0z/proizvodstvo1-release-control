@@ -111,6 +111,11 @@ bootstrap; normal publication stops with `GHCR_PACKAGE_ABSENT_BOOTSTRAP_REQUIRED
 
 The VPS uses a different pull-only GHCR credential stored only on the VPS. The public workflow never receives the VPS GHCR pull credential.
 
+The VPS Docker auth file is technically enforced as a regular non-symlink,
+root-owned file with no group/other mode bits (`mode & 0077 == 0`). Its parent
+remains root-owned and not group/other writable; credential content is never
+printed.
+
 ## Secret separation by job
 
 The publisher deliberately separates credentials across jobs.
@@ -198,7 +203,8 @@ A normal manifest push uses the root-owned wrapper transaction:
 
 ```text
 deploy IMAGE
-  -> PENDING_IMAGE
+  -> durable PENDING_IMAGE
+  -> exact pull
   -> portal health only
 
 protected GitHub full smoke
@@ -245,6 +251,17 @@ Any ambiguous crash state leaves either an explicit pending state or a live/curr
 - deployment and final GHCR metadata operations are separated into different jobs.
 - normal publish, build-only and scheduled cleanup share non-cancelling
   concurrency group `p1-react-staging-release-mutation`.
+
+Because Actions history is public, private source preparation, application
+gates, BuildKit, candidate pull and runtime diagnostics write only to private
+files under `RUNNER_TEMP`. Success emits a generic marker and deletes the log.
+Failure emits only a generic marker plus hidden-log byte count and SHA-256. Log
+contents are never printed or uploaded, and always-cleanup removes the private
+logs, source checkout, snapshots, archive and metadata.
+
+Before a VPS pull, `PENDING_IMAGE` is saved durably. A reported pull failure
+transitions durably to exact `BLOCKED_IMAGE` before deletion and records bounded
+cleanup evidence without broad prune.
 
 ## Branch protection
 

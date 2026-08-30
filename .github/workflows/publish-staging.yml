@@ -244,42 +244,74 @@ jobs:
           BOOTSTRAP_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
-            python3 scripts/publish_preflight.py \
-              --bootstrap-source-sha "$BOOTSTRAP_SOURCE_SHA" \
-              --source-dir source-checkout
-          else
-            python3 scripts/publish_preflight.py \
-              --manifest release/staging.json \
-              --source-dir source-checkout
+          private_log_evidence() {
+            local stage="$1" log="$2" bytes digest
+            bytes="$(wc -c < "$log" | tr -d '[:space:]')"
+            digest="$(sha256sum "$log" | awk '{print $1}')"
+            echo "${stage}_FAILED"
+            echo "${stage}_LOG_BYTES=$bytes"
+            echo "${stage}_LOG_SHA256=$digest"
+          }
+          private_log="$RUNNER_TEMP/private-source-preparation.log"
+          set +e
+          (
+            set -euo pipefail
+            if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+              python3 scripts/publish_preflight.py \
+                --bootstrap-source-sha "$BOOTSTRAP_SOURCE_SHA" \
+                --source-dir source-checkout
+            else
+              python3 scripts/publish_preflight.py \
+                --manifest release/staging.json \
+                --source-dir source-checkout
+            fi
+
+            python3 - <<'PY'
+            import subprocess
+            entries = subprocess.check_output(
+                ["git", "-C", "source-checkout", "ls-tree", "-r", "HEAD"],
+                text=True,
+            )
+            for line in entries.splitlines():
+                meta, _path = line.split("\t", 1)
+                mode, kind, _sha = meta.split()
+                if mode in {"120000", "160000"} or kind != "blob":
+                    raise SystemExit("PRIVATE_SOURCE_TREE_UNSUPPORTED_ENTRY")
+            PY
+
+            archive="$RUNNER_TEMP/p1-source.tar"
+            git -C source-checkout archive --format=tar --output="$archive" HEAD
+            chmod 0444 "$archive"
+            test_dir="$RUNNER_TEMP/p1-test-source"
+            mkdir -p "$test_dir"
+            tar -xf "$archive" -C "$test_dir"
+          ) > "$private_log" 2>&1
+          private_status="$?"
+          set -e
+          if [[ "$private_status" != 0 ]]; then
+            private_log_evidence P1_PRIVATE_SOURCE_PREPARATION "$private_log"
+            exit "$private_status"
           fi
-
-          python3 - <<'PY'
-          import subprocess
-          for line in subprocess.check_output(["git", "-C", "source-checkout", "ls-tree", "-r", "HEAD"], text=True).splitlines():
-              meta, path = line.split("\t", 1)
-              mode, kind, _sha = meta.split()
-              if mode in {"120000", "160000"} or kind != "blob":
-                  raise SystemExit(f"source snapshot rejects symlink/submodule entry: {path} ({mode} {kind})")
-          print("P1_SOURCE_TREE_SNAPSHOT_SAFE")
-          PY
-
-          archive="$RUNNER_TEMP/p1-source.tar"
-          git -C source-checkout archive --format=tar --output="$archive" HEAD
-          chmod 0444 "$archive"
-          echo "SOURCE_ARCHIVE_SHA256=$(sha256sum "$archive" | awk '{print $1}')"
-
-          test_dir="$RUNNER_TEMP/p1-test-source"
-          mkdir -p "$test_dir"
-          tar -xf "$archive" -C "$test_dir"
+          rm -f -- "$private_log"
+          echo "P1_PRIVATE_SOURCE_PREPARATION_VALID"
 
       - name: Repeat application gates only inside isolated test snapshot
         shell: bash
         run: |
           set -euo pipefail
+          private_log_evidence() {
+            local stage="$1" log="$2" bytes digest
+            bytes="$(wc -c < "$log" | tr -d '[:space:]')"
+            digest="$(sha256sum "$log" | awk '{print $1}')"
+            echo "${stage}_FAILED"
+            echo "${stage}_LOG_BYTES=$bytes"
+            echo "${stage}_LOG_SHA256=$digest"
+          }
           test_dir="$RUNNER_TEMP/p1-test-source"
+          private_log="$RUNNER_TEMP/private-application-gates.log"
           uid="$(id -u)"
           gid="$(id -g)"
+          set +e
           docker run --rm \
             --user "$uid:$gid" \
             -e HOME=/tmp \
@@ -298,16 +330,45 @@ jobs:
               cd app/ai
               bun install --no-save
               bun run check
-            '
+            ' > "$private_log" 2>&1
+          private_status="$?"
+          set -e
+          if [[ "$private_status" != 0 ]]; then
+            private_log_evidence P1_PRIVATE_APPLICATION_GATES "$private_log"
+            exit "$private_status"
+          fi
+          rm -f -- "$private_log"
+          echo "P1_PRIVATE_APPLICATION_GATES_VALID"
 
       - name: Materialize untouched build snapshot after tests
         shell: bash
         run: |
           set -euo pipefail
-          build_dir="$RUNNER_TEMP/p1-build-source"
-          mkdir -p "$build_dir"
-          tar -xf "$RUNNER_TEMP/p1-source.tar" -C "$build_dir"
-          [[ ! -e "$build_dir/.git" ]] || { echo "git metadata leaked into build snapshot" >&2; exit 1; }
+          private_log_evidence() {
+            local stage="$1" log="$2" bytes digest
+            bytes="$(wc -c < "$log" | tr -d '[:space:]')"
+            digest="$(sha256sum "$log" | awk '{print $1}')"
+            echo "${stage}_FAILED"
+            echo "${stage}_LOG_BYTES=$bytes"
+            echo "${stage}_LOG_SHA256=$digest"
+          }
+          private_log="$RUNNER_TEMP/private-build-materialize.log"
+          set +e
+          (
+            set -euo pipefail
+            build_dir="$RUNNER_TEMP/p1-build-source"
+            mkdir -p "$build_dir"
+            tar -xf "$RUNNER_TEMP/p1-source.tar" -C "$build_dir"
+            [[ ! -e "$build_dir/.git" ]] || exit 1
+          ) > "$private_log" 2>&1
+          private_status="$?"
+          set -e
+          if [[ "$private_status" != 0 ]]; then
+            private_log_evidence P1_PRIVATE_BUILD_MATERIALIZE "$private_log"
+            exit "$private_status"
+          fi
+          rm -f -- "$private_log"
+          echo "P1_PRIVATE_BUILD_MATERIALIZE_VALID"
 
       - name: Prove GHCR package privacy before candidate push
         shell: bash
@@ -366,9 +427,19 @@ jobs:
           SOURCE_TAG: ${{ steps.source.outputs.source_tag }}
         run: |
           set -euo pipefail
+          private_log_evidence() {
+            local stage="$1" log="$2" bytes digest
+            bytes="$(wc -c < "$log" | tr -d '[:space:]')"
+            digest="$(sha256sum "$log" | awk '{print $1}')"
+            echo "${stage}_FAILED"
+            echo "${stage}_LOG_BYTES=$bytes"
+            echo "${stage}_LOG_SHA256=$digest"
+          }
           build_dir="$RUNNER_TEMP/p1-build-source"
           metadata="$RUNNER_TEMP/build-metadata.json"
+          private_log="$RUNNER_TEMP/private-buildkit.log"
           export BUILDX_NO_DEFAULT_ATTESTATIONS=1
+          set +e
           docker buildx build \
             --platform linux/amd64 \
             --provenance=false \
@@ -380,7 +451,15 @@ jobs:
             -t "$IMAGE_REPOSITORY:$CANDIDATE_TAG" \
             -t "$IMAGE_REPOSITORY:$SOURCE_TAG" \
             --metadata-file "$metadata" \
-            "$build_dir"
+            "$build_dir" > "$private_log" 2>&1
+          private_status="$?"
+          set -e
+          if [[ "$private_status" != 0 ]]; then
+            private_log_evidence P1_PRIVATE_BUILDKIT "$private_log"
+            exit "$private_status"
+          fi
+          rm -f -- "$private_log"
+          echo "P1_PRIVATE_BUILDKIT_VALID"
           digest="$(python3 - "$metadata" <<'PY'
           import json, re, sys
           value = json.load(open(sys.argv[1], encoding="utf-8")).get("containerimage.digest", "")
@@ -436,25 +515,68 @@ jobs:
           RELEASE_IDENTITY: ${{ steps.source.outputs.release_identity }}
         run: |
           set -euo pipefail
-          docker pull "$IMAGE" >/dev/null
-          revision="$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")"
-          [[ "$revision" == "$SOURCE_SHA" ]] || { echo "OCI revision label mismatch" >&2; exit 1; }
-          identity="$(docker inspect -f '{{ index .Config.Labels "io.proizvodstvo1.release.identity" }}' "$IMAGE")"
-          [[ "$identity" == "$RELEASE_IDENTITY" ]] || { echo "release identity label mismatch" >&2; exit 1; }
+          private_log_evidence() {
+            local stage="$1" log="$2" bytes digest
+            bytes="$(wc -c < "$log" | tr -d '[:space:]')"
+            digest="$(sha256sum "$log" | awk '{print $1}')"
+            echo "${stage}_FAILED"
+            echo "${stage}_LOG_BYTES=$bytes"
+            echo "${stage}_LOG_SHA256=$digest"
+          }
+          pull_log="$RUNNER_TEMP/private-candidate-pull.log"
+          runtime_log="$RUNNER_TEMP/private-image-runtime.log"
+          set +e
+          docker pull "$IMAGE" > "$pull_log" 2>&1
+          pull_status="$?"
+          set -e
+          if [[ "$pull_status" != 0 ]]; then
+            private_log_evidence P1_PRIVATE_CANDIDATE_PULL "$pull_log"
+            exit "$pull_status"
+          fi
+          rm -f -- "$pull_log"
+          echo "P1_PRIVATE_CANDIDATE_PULL_VALID"
+
+          : > "$runtime_log"
+          set +e
+          revision="$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE" 2>> "$runtime_log")"
+          revision_status="$?"
+          identity="$(docker inspect -f '{{ index .Config.Labels "io.proizvodstvo1.release.identity" }}' "$IMAGE" 2>> "$runtime_log")"
+          identity_status="$?"
+          set -e
+          if [[ "$revision_status" != 0 || "$identity_status" != 0 ]]; then
+            private_log_evidence P1_PRIVATE_IMAGE_METADATA "$runtime_log"
+            exit 1
+          fi
+          if ! [[ "$revision" == "$SOURCE_SHA" ]]; then
+            private_log_evidence P1_PRIVATE_IMAGE_REVISION "$runtime_log"
+            exit 1
+          fi
+          if ! [[ "$identity" == "$RELEASE_IDENTITY" ]]; then
+            private_log_evidence P1_PRIVATE_RELEASE_IDENTITY "$runtime_log"
+            exit 1
+          fi
+          set +e
           docker run -d \
             --name "$SMOKE_CONTAINER" \
             --read-only \
             --tmpfs /tmp:rw,nosuid,nodev,size=32m \
-            "$IMAGE" >/dev/null
+            "$IMAGE" >> "$runtime_log" 2>&1
+          run_status="$?"
+          set -e
+          if [[ "$run_status" != 0 ]]; then
+            private_log_evidence P1_PRIVATE_IMAGE_RUNTIME "$runtime_log"
+            exit "$run_status"
+          fi
           for _ in $(seq 1 45); do
             if docker exec "$SMOKE_CONTAINER" bun -e "const r=await fetch('http://127.0.0.1:18180/health'); const j=await r.json(); if(!r.ok||j.status!=='ok'||j.seoIndexable!==false) process.exit(1)" >/dev/null 2>&1; then
+              rm -f -- "$runtime_log"
               echo "P1_RELEASE_IMAGE_HEALTH_VALID"
               exit 0
             fi
             sleep 1
           done
-          docker logs "$SMOKE_CONTAINER" >&2 || true
-          echo "release image health timeout" >&2
+          docker logs "$SMOKE_CONTAINER" >> "$runtime_log" 2>&1 || true
+          private_log_evidence P1_PRIVATE_IMAGE_HEALTH "$runtime_log"
           exit 1
 
       - name: Build-only summary
@@ -463,8 +585,6 @@ jobs:
         env:
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
           RELEASE_IDENTITY: ${{ steps.source.outputs.release_identity }}
-          CANDIDATE_TAG: ${{ steps.source.outputs.candidate_tag }}
-          SOURCE_TAG: ${{ steps.source.outputs.source_tag }}
           DEPLOYED_TAG: ${{ steps.source.outputs.deployed_tag }}
           IMAGE: ${{ steps.image.outputs.image }}
         run: |
@@ -474,8 +594,6 @@ jobs:
             echo
             echo "- Source SHA: \`$SOURCE_SHA\`"
             echo "- Release identity: \`$RELEASE_IDENTITY\`"
-            echo "- Candidate tag: \`$CANDIDATE_TAG\`"
-            echo "- Source tag: \`$SOURCE_TAG\`"
             echo "- Candidate: \`$IMAGE\`"
             echo "- Live staging: not touched"
             echo "- Candidate remains protected by the 48h GHCR grace window"
@@ -492,13 +610,20 @@ jobs:
           [[ -z "$IMAGE" ]] || docker image rm "$IMAGE" >/dev/null 2>&1 || true
           docker logout ghcr.io >/dev/null 2>&1 || true
           rm -rf -- \
+            "$GITHUB_WORKSPACE/source-checkout" \
             "$RUNNER_TEMP/p1-test-source" \
             "$RUNNER_TEMP/p1-build-source"
           rm -f -- \
             "$RUNNER_TEMP/p1-source.tar" \
             "$RUNNER_TEMP/protected-before.txt" \
             "$RUNNER_TEMP/build-metadata.json" \
-            "$RUNNER_TEMP/built-image.txt"
+            "$RUNNER_TEMP/built-image.txt" \
+            "$RUNNER_TEMP/private-source-preparation.log" \
+            "$RUNNER_TEMP/private-application-gates.log" \
+            "$RUNNER_TEMP/private-build-materialize.log" \
+            "$RUNNER_TEMP/private-buildkit.log" \
+            "$RUNNER_TEMP/private-candidate-pull.log" \
+            "$RUNNER_TEMP/private-image-runtime.log"
 
   deploy:
     name: Transactional React staging deployment

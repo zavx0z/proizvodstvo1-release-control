@@ -30,7 +30,9 @@ next_ring() {
 
 self_test() {
   local a b c n action image extra runtime_block deploy_block write_block
-  local deprecated_restore commit_block durable_marker delete_marker
+  local deprecated_restore commit_block durable_marker delete_marker normal_pull_block
+  local pending_marker pending_save pull_marker pull_failure_block blocked_marker
+  local blocked_save blocked_delete private_file_block config_usage_block
   a="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'a%.0s' {1..64})"
   b="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'b%.0s' {1..64})"
   c="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'c%.0s' {1..64})"
@@ -65,6 +67,26 @@ self_test() {
   [[ "$deploy_block" == *'recovery-required deploy "$image"'* ]]
   [[ "$write_block" == *'mktemp "$IMAGE_ENV_PARENT/.p1tmp.image-env.XXXXXX"'* ]]
 
+  normal_pull_block="$(printf '%s\n' "$deploy_block" | sed -n '/disk_guard || fail/,/if apply_live_image/p')"
+  pending_marker="$(printf '%s\n' "$normal_pull_block" | grep -n 'PENDING_IMAGE="$image"' | head -n 1 | cut -d: -f1)"
+  pending_save="$(printf '%s\n' "$normal_pull_block" | grep -n 'save_state' | head -n 1 | cut -d: -f1)"
+  pull_marker="$(printf '%s\n' "$normal_pull_block" | grep -n 'docker --config "$DOCKER_CONFIG_DIR" pull "$image"' | head -n 1 | cut -d: -f1)"
+  [[ "$pending_marker" =~ ^[0-9]+$ && "$pending_save" =~ ^[0-9]+$ && "$pull_marker" =~ ^[0-9]+$ ]]
+  (( pending_marker < pending_save && pending_save < pull_marker ))
+
+  pull_failure_block="$(printf '%s\n' "$normal_pull_block" | sed -n '/if ! docker --config/,/fi$/p')"
+  blocked_marker="$(printf '%s\n' "$pull_failure_block" | grep -n 'BLOCKED_IMAGE="$image"' | head -n 1 | cut -d: -f1)"
+  blocked_save="$(printf '%s\n' "$pull_failure_block" | grep -n 'save_state' | head -n 1 | cut -d: -f1)"
+  blocked_delete="$(printf '%s\n' "$pull_failure_block" | grep -n 'remove_exact_image "$image"' | head -n 1 | cut -d: -f1)"
+  [[ "$blocked_marker" =~ ^[0-9]+$ && "$blocked_save" =~ ^[0-9]+$ && "$blocked_delete" =~ ^[0-9]+$ ]]
+  (( blocked_marker < blocked_save && blocked_save < blocked_delete ))
+
+  private_file_block="$(sed -n '/^require_private_root_file()/,/^}/p' "$0")"
+  config_usage_block="$(sed -n '/^require_private_root_file()/,/^ACTIVE_TMP=/p' "$0")"
+  [[ "$private_file_block" == *'! -L "$path"'* || "$private_file_block" == *'require_root_file "$path"'* ]]
+  [[ "$private_file_block" == *'(8#$mode & 0077)'* ]]
+  [[ "$config_usage_block" == *'require_private_root_file "$DOCKER_CONFIG_DIR/config.json"'* ]]
+
   commit_block="$(sed -n '/^  commit)/,/^  rollback)/p' "$0")"
   durable_marker="$(printf '%s\n' "$commit_block" | grep -n 'Durably commit the new ring before exact outgoing deletion' | cut -d: -f1)"
   delete_marker="$(printf '%s\n' "$commit_block" | grep -n 'remove_exact_image "$outgoing"' | head -n 1 | cut -d: -f1)"
@@ -88,6 +110,13 @@ require_root_file() {
   local mode
   mode="$(stat -c '%a' "$path")"
   (( (8#$mode & 0022) == 0 )) || fail "file must not be group/other writable: $path"
+}
+
+require_private_root_file() {
+  local path="$1" mode
+  require_root_file "$path"
+  mode="$(stat -c '%a' "$path")"
+  (( (8#$mode & 0077) == 0 )) || fail "private file must have no group/other permissions: $path"
 }
 
 require_root_dir() {
@@ -138,7 +167,7 @@ validate_image_env_target "$IMAGE_ENV_PARENT" "$STAGING_IMAGE_ENV" || fail "STAG
 require_root_file "$STAGING_COMPOSE_FILE"
 require_root_file "$STAGING_RUNTIME_ENV"
 require_root_dir "$DOCKER_CONFIG_DIR"
-require_root_file "$DOCKER_CONFIG_DIR/config.json"
+require_private_root_file "$DOCKER_CONFIG_DIR/config.json"
 
 if [[ ! -d "$STATE_DIR" ]]; then
   install -d -m 0750 -o root -g root "$STATE_DIR"
@@ -462,10 +491,23 @@ case "$action" in
     fi
 
     disk_guard || fail "DISK_GUARD_BLOCKED"
-    docker --config "$DOCKER_CONFIG_DIR" pull "$image" >/dev/null || fail "target image pull failed"
-
     PENDING_IMAGE="$image"
     save_state
+    if ! docker --config "$DOCKER_CONFIG_DIR" pull "$image" >/dev/null 2>&1; then
+      PENDING_IMAGE=""
+      BLOCKED_IMAGE="$image"
+      # Durably transition failed pull evidence before exact candidate deletion.
+      save_state
+      if remove_exact_image "$image"; then
+        BLOCKED_IMAGE=""
+        save_state
+        append_ledger pull-failed-cleanup-ok deploy "$image"
+        fail "target image pull failed; exact candidate cleanup OK"
+      fi
+      append_ledger pull-failed-cleanup-blocked deploy "$image"
+      fail "target image pull failed; CLEANUP_BLOCKED"
+    fi
+
     if apply_live_image "$image" "$CURRENT_IMAGE"; then
       apply_status="$APPLY_OK"
     else

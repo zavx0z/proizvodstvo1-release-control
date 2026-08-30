@@ -41,6 +41,11 @@ Rules:
 
 No self-hosted build workspace is used, so checkout, `node_modules`, BuildKit state and temporary containers disappear with the GitHub-hosted VM.
 
+Private source preparation, test/build, BuildKit, pull and runtime diagnostics
+are redirected to `RUNNER_TEMP`. On failure only bytes and SHA-256 are public.
+No log content is printed or uploaded; always-cleanup removes the private source
+checkout, snapshots, archive, metadata and diagnostic logs.
+
 ## 3. Private GHCR package
 
 Canonical package:
@@ -138,7 +143,9 @@ A normal successful transaction is:
 A=current, B=rollback, C=safety
 
 deploy N
-  -> live=N, pending=N
+  -> pending=N (durable)
+  -> pull N
+  -> live=N
   -> committed ring remains A/B/C
 
 full GitHub smoke
@@ -163,6 +170,11 @@ This means the safety image is never discarded before full smoke succeeds.
 During commit, the new ring and outgoing `BLOCKED_IMAGE` are saved durably
 before deletion. A crash leaves a consistent ring plus explicit cleanup
 evidence. Successful deletion clears blocked state and saves again.
+
+Before pull, the candidate is first saved as `PENDING_IMAGE`. A pull crash is
+therefore recoverable. A reported pull failure clears pending only while
+durably recording the exact candidate as `BLOCKED_IMAGE`; exact cleanup happens
+after that save and never falls back to broad prune.
 
 ## 6. VPS exact image cleanup
 

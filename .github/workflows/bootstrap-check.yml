@@ -196,6 +196,58 @@ jobs:
               if token not in combined:
                   raise SystemExit(f"missing unique release identity contract: {token}")
 
+          def step_block(workflow: str, name: str) -> str:
+              marker = f"      - name: {name}\n"
+              start = workflow.index(marker)
+              end = workflow.find("\n      - name: ", start + len(marker))
+              return workflow[start:] if end < 0 else workflow[start:end]
+
+          source_step = step_block(
+              publish, "Prove current ai-dev and freeze immutable source archive"
+          )
+          application_step = step_block(
+              publish, "Repeat application gates only inside isolated test snapshot"
+          )
+          materialize_step = step_block(
+              publish, "Materialize untouched build snapshot after tests"
+          )
+          build_step = step_block(publish, "Build and push exact immutable candidate")
+          runtime_step = step_block(
+              publish, "Pull candidate and verify release image revision and health"
+          )
+          cleanup_step = step_block(publish, "Always clean ephemeral build state")
+
+          public_log_tokens = (
+              (source_step, 'private-source-preparation.log'),
+              (source_step, 'PRIVATE_SOURCE_TREE_UNSUPPORTED_ENTRY'),
+              (application_step, 'private-application-gates.log'),
+              (application_step, 'docker run --rm'),
+              (application_step, '> "$private_log" 2>&1'),
+              (materialize_step, 'private-build-materialize.log'),
+              (materialize_step, '> "$private_log" 2>&1'),
+              (build_step, 'private-buildkit.log'),
+              (build_step, 'docker buildx build'),
+              (build_step, '> "$private_log" 2>&1'),
+              (runtime_step, 'docker pull "$IMAGE" > "$pull_log" 2>&1'),
+              (runtime_step, 'docker logs "$SMOKE_CONTAINER" >> "$runtime_log" 2>&1'),
+              (runtime_step, 'P1_PRIVATE_IMAGE_HEALTH'),
+              (cleanup_step, '$GITHUB_WORKSPACE/source-checkout'),
+              (cleanup_step, 'private-source-preparation.log'),
+              (cleanup_step, 'private-application-gates.log'),
+              (cleanup_step, 'private-buildkit.log'),
+              (cleanup_step, 'private-candidate-pull.log'),
+              (cleanup_step, 'private-image-runtime.log'),
+          )
+          for block, token in public_log_tokens:
+              if token not in block:
+                  raise SystemExit(f"missing private-log redaction/cleanup contract: {token}")
+          if 'docker logs "$SMOKE_CONTAINER" >&2' in publish:
+              raise SystemExit("raw private runtime logs remain public")
+          if "source snapshot rejects symlink/submodule entry:" in publish:
+              raise SystemExit("private source-tree rejection still prints a path")
+          if publish.count("_LOG_BYTES=") < 4 or publish.count("_LOG_SHA256=") < 4:
+              raise SystemExit("private diagnostic logs must expose hash/byte evidence only")
+
           wrapper = pathlib.Path("ops/p1-react-staging-deploy.sh").read_text("utf-8")
           deprecated_restore = "restore_previous_portal_best" + "_effort"
           if deprecated_restore in wrapper:
@@ -226,6 +278,37 @@ jobs:
           recovery_block = deploy_block[recovery_marker:deploy_block.index("    esac", recovery_marker)]
           if 'PENDING_IMAGE=""' in recovery_block or 'remove_exact_image "$image"' in recovery_block:
               raise SystemExit("recovery-required path destroys pending evidence")
+
+          normal_deploy = deploy_block[deploy_block.index("disk_guard || fail"):]
+          pending_before_pull = normal_deploy.index('PENDING_IMAGE="$image"')
+          pending_save = normal_deploy.index("save_state", pending_before_pull)
+          pull_image = normal_deploy.index(
+              'docker --config "$DOCKER_CONFIG_DIR" pull "$image"'
+          )
+          if not pending_before_pull < pending_save < pull_image:
+              raise SystemExit("pending state must be durable before exact image pull")
+
+          pull_failure = normal_deploy[
+              normal_deploy.index('if ! docker --config "$DOCKER_CONFIG_DIR" pull "$image"'):
+              normal_deploy.index("if apply_live_image")
+          ]
+          pending_clear = pull_failure.index('PENDING_IMAGE=""')
+          blocked_set = pull_failure.index('BLOCKED_IMAGE="$image"')
+          blocked_save = pull_failure.index("save_state", blocked_set)
+          blocked_delete = pull_failure.index('remove_exact_image "$image"')
+          if not pending_clear < blocked_set < blocked_save < blocked_delete:
+              raise SystemExit("pull failure must durably block candidate before deletion")
+
+          private_config_tokens = (
+              "require_private_root_file",
+              '(8#$mode & 0077)',
+              'require_private_root_file "$DOCKER_CONFIG_DIR/config.json"',
+          )
+          for token in private_config_tokens:
+              if token not in wrapper:
+                  raise SystemExit(f"missing private Docker config mode contract: {token}")
+          if 'cat "$DOCKER_CONFIG_DIR/config.json"' in wrapper:
+              raise SystemExit("Docker credential content must never be printed")
 
           commit_block = wrapper[commit_start:rollback_start]
           durable_marker = commit_block.index("Durably commit the new ring before exact outgoing deletion")
