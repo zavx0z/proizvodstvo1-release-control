@@ -115,7 +115,7 @@ def validate_source(source_dir: pathlib.Path, manifest: dict) -> None:
         "bun.lock",
         "app/ai/package.json",
         "app/ai/Dockerfile.release",
-        "app/ai/ops/staging-smoke.sh",
+        "app/ai/Dockerfile.release.dockerignore",
         "pkg/institute",
     ]
     missing = [item for item in required if not (source_dir / item).exists()]
