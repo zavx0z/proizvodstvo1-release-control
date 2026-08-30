@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import datetime as dt
 import json
 import os
@@ -72,6 +73,16 @@ def validate_text_safety(path: str, text: str) -> None:
     for pattern in SECRET_PATTERNS:
         if pattern.search(text):
             reject(f"possible secret material rejected in {path}")
+
+
+def decode_api_base64(content: str, path: str) -> bytes:
+    if not isinstance(content, str):
+        reject(f"GitHub content is not base64 text for {path}")
+    normalized = "".join(content.split())
+    try:
+        return base64.b64decode(normalized, validate=True)
+    except (binascii.Error, ValueError) as error:
+        reject(f"GitHub content has invalid base64 for {path}: {error}")
 
 
 def validate_manifest(text: str) -> dict:
@@ -229,7 +240,7 @@ class GitHubAPI:
         )
         if data.get("type") != "file" or data.get("encoding") != "base64":
             reject(f"expected regular file content for {path}")
-        raw = base64.b64decode(data["content"], validate=True)
+        raw = decode_api_base64(data.get("content"), path)
         if len(raw) > 131072 or b"\x00" in raw:
             reject(f"non-text or oversized file rejected: {path}")
         return raw.decode("utf-8")
@@ -285,6 +296,11 @@ def run_self_test() -> None:
 
     def fetch(path: str, ref: str) -> str:
         return texts[(path, ref)]
+
+    wrapped = base64.b64encode(b"wrapped GitHub API content\n").decode("ascii")
+    wrapped = wrapped[:8] + "\n" + wrapped[8:16] + "\n" + wrapped[16:]
+    assert decode_api_base64(wrapped, "fixture.txt") == b"wrapped GitHub API content\n"
+    expect_error(lambda: decode_api_base64("%%%", "fixture.txt"), "invalid base64")
 
     release_pr = {
         "head": {
