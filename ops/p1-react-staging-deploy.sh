@@ -370,9 +370,24 @@ case "$action" in
 
     disk_guard || fail "DISK_GUARD_BLOCKED"
     docker --config "$DOCKER_CONFIG_DIR" pull "$image" >/dev/null || fail "target image pull failed"
-    apply_live_image "$image" "$CURRENT_IMAGE" || fail "new portal did not become healthy; previous current restored"
+
     PENDING_IMAGE="$image"
     save_state
+    if ! apply_live_image "$image" "$CURRENT_IMAGE"; then
+      PENDING_IMAGE=""
+      if remove_exact_image "$image"; then
+        BLOCKED_IMAGE=""
+      else
+        BLOCKED_IMAGE="$image"
+      fi
+      save_state
+      append_ledger apply-failed deploy "$image"
+      if [[ -n "$BLOCKED_IMAGE" ]]; then
+        fail "new portal did not become healthy; previous current restored; CLEANUP_BLOCKED"
+      fi
+      fail "new portal did not become healthy; previous current restored and candidate removed"
+    fi
+
     append_ledger pending deploy "$image"
     echo "STATUS=pending"
     echo "CURRENT_IMAGE=$CURRENT_IMAGE"
@@ -441,9 +456,9 @@ case "$action" in
 
     failed_image="$PENDING_IMAGE"
     live_now="$(live_image)"
-    [[ "$live_now" == "$PENDING_IMAGE" ]] || fail "live image no longer matches pending image"
 
     if [[ "$PENDING_IMAGE" == "$CURRENT_IMAGE" ]]; then
+      [[ "$live_now" == "$CURRENT_IMAGE" ]] || fail "no-op pending state has unexpected live image"
       PENDING_IMAGE=""
       save_state
       append_ledger rollback-noop rollback "$failed_image"
@@ -456,6 +471,27 @@ case "$action" in
       exit 0
     fi
 
+    if [[ "$live_now" == "$CURRENT_IMAGE" ]]; then
+      PENDING_IMAGE=""
+      if remove_exact_image "$failed_image"; then
+        BLOCKED_IMAGE=""
+        cleanup="OK"
+      else
+        BLOCKED_IMAGE="$failed_image"
+        cleanup="CLEANUP_BLOCKED"
+      fi
+      save_state
+      append_ledger recovered-before-switch rollback "$failed_image"
+      echo "STATUS=ok"
+      echo "CLEANUP_STATUS=$cleanup"
+      echo "CURRENT_IMAGE=$CURRENT_IMAGE"
+      echo "ROLLBACK_IMAGE=$ROLLBACK_IMAGE"
+      echo "SAFETY_IMAGE=$SAFETY_IMAGE"
+      echo "BLOCKED_IMAGE=$BLOCKED_IMAGE"
+      exit 0
+    fi
+
+    [[ "$live_now" == "$PENDING_IMAGE" ]] || fail "live image matches neither committed current nor pending image"
     apply_live_image "$CURRENT_IMAGE" "$PENDING_IMAGE" || fail "rollback failed"
     PENDING_IMAGE=""
     if remove_exact_image "$failed_image"; then
