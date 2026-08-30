@@ -164,13 +164,86 @@ jobs:
           if "\n  schedule:\n" not in cleanup:
               raise SystemExit("GHCR cleanup must retain its scheduled trigger")
 
+          shared_group = "group: p1-react-staging-release-mutation"
+          for label, workflow in (("publish", publish), ("cleanup", cleanup)):
+              if workflow.count(shared_group) != 1:
+                  raise SystemExit(f"{label} workflow must use the exact shared concurrency group")
+              if workflow.count("cancel-in-progress: false") != 1:
+                  raise SystemExit(f"{label} workflow must serialize without cancellation")
+
+          privacy_tokens = (
+              "Prove GHCR package privacy before candidate push",
+              "P1_GHCR_PACKAGE_PRIVATE_PRE_PUSH",
+              "P1_GHCR_PACKAGE_ABSENT_BOOTSTRAP_ALLOWED",
+              "GHCR_PACKAGE_ABSENT_BOOTSTRAP_REQUIRED",
+              'event_name == "workflow_dispatch"',
+          )
+          for token in privacy_tokens:
+              if token not in publish:
+                  raise SystemExit(f"missing pre-push GHCR privacy contract: {token}")
+          if publish.index("Prove GHCR package privacy before candidate push") > publish.index("docker buildx build"):
+              raise SystemExit("GHCR privacy gate must run before the first candidate push")
+
+          identity_tokens = (
+              '"release_identity": f"staging-seq-{sequence}"',
+              '"release_identity": f"bootstrap-sha-{source_sha}"',
+              'release_identity: ${{ steps.source.outputs.release_identity }}',
+              '--label "io.proizvodstvo1.release.identity=$RELEASE_IDENTITY"',
+              'index .Config.Labels "io.proizvodstvo1.release.identity"',
+              '[[ "$identity" == "$RELEASE_IDENTITY" ]]',
+          )
+          for token in identity_tokens:
+              if token not in combined:
+                  raise SystemExit(f"missing unique release identity contract: {token}")
+
           wrapper = pathlib.Path("ops/p1-react-staging-deploy.sh").read_text("utf-8")
-          if 'if [[ -z "$new_id" ]]; then' not in wrapper:
-              raise SystemExit("missing empty portal ID restoration branch")
-          if wrapper.count('restore_previous_portal_best_effort "$previous"') < 4:
-              raise SystemExit("portal restoration is not applied to every failure branch")
-          if 'fail "staging Nginx container changed during portal update"' in wrapper:
-              raise SystemExit("Nginx drift must return to caller after portal restoration")
+          deprecated_restore = "restore_previous_portal_best" + "_effort"
+          if deprecated_restore in wrapper:
+              raise SystemExit("silent best-effort portal restore remains")
+          restore_tokens = (
+              "restore_previous_portal_verified",
+              'restored_env" == "$previous"',
+              'restored_image" == "$previous"',
+              'check_health "$restored_id"',
+              'restored_nginx" == "$expected_nginx"',
+              "APPLY_FAILED_PREVIOUS_VERIFIED",
+              "APPLY_FAILED_RECOVERY_REQUIRED",
+              'append_ledger recovery-required deploy "$image"',
+              'fail "PENDING_RECOVERY_REQUIRED:',
+              '"$configured_image" == "$PENDING_IMAGE" && "$current_live" == "$CURRENT_IMAGE"',
+              '"$configured_image" == "$CURRENT_IMAGE" && "$current_live" == "$PENDING_IMAGE"',
+          )
+          for token in restore_tokens:
+              if token not in wrapper:
+                  raise SystemExit(f"missing verified restore/recovery contract: {token}")
+
+          case_start = wrapper.index('case "$action" in')
+          deploy_start = wrapper.index("\n  deploy)\n", case_start)
+          commit_start = wrapper.index("\n  commit)\n", deploy_start)
+          rollback_start = wrapper.index("\n  rollback)\n", commit_start)
+          deploy_block = wrapper[deploy_start:commit_start]
+          recovery_marker = deploy_block.index('"$APPLY_FAILED_RECOVERY_REQUIRED"|*)')
+          recovery_block = deploy_block[recovery_marker:deploy_block.index("    esac", recovery_marker)]
+          if 'PENDING_IMAGE=""' in recovery_block or 'remove_exact_image "$image"' in recovery_block:
+              raise SystemExit("recovery-required path destroys pending evidence")
+
+          commit_block = wrapper[commit_start:rollback_start]
+          durable_marker = commit_block.index("Durably commit the new ring before exact outgoing deletion")
+          durable_save = commit_block.index("save_state", durable_marker)
+          outgoing_delete = commit_block.index('remove_exact_image "$outgoing"')
+          if not durable_marker < durable_save < outgoing_delete:
+              raise SystemExit("new ring state must be durable before outgoing deletion")
+
+          atomic_tokens = (
+              'realpath -e -- "$parent"',
+              'realpath -e -- "$target"',
+              'mktemp "$IMAGE_ENV_PARENT/.p1tmp.image-env.XXXXXX"',
+              'mv -f -- "$ACTIVE_TMP" "$STAGING_IMAGE_ENV"',
+              "-name '.p1tmp.image-env.*' -mmin +1440 -delete",
+          )
+          for token in atomic_tokens:
+              if token not in wrapper:
+                  raise SystemExit(f"missing atomic image-env contract: {token}")
 
           print("P1_RELEASE_CONTROL_WORKFLOW_POLICY_VALID")
           PY

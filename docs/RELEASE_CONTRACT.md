@@ -203,6 +203,21 @@ It never creates a `deployed-seq-*` tag.
 
 Before any deployment, the workflow verifies through GitHub Packages API that the package visibility is exactly `private`.
 
+The same proof runs before the first candidate push. An existing package must be
+private; absence is allowed only for manual build-only bootstrap. Normal
+manifest publication stops and requires bootstrap first.
+
+The image config includes an exact release identity:
+
+```text
+normal: io.proizvodstvo1.release.identity=staging-seq-<sequence>
+build-only: io.proizvodstvo1.release.identity=bootstrap-sha-<source_sha>
+```
+
+The workflow verifies this label after pull together with the OCI revision. A
+new sequence therefore gets a distinct manifest digest even when source SHA is
+reused.
+
 After a successful committed deployment, the finalize job adds:
 
 ```text
@@ -291,6 +306,23 @@ A repeated release of the already-current immutable digest is handled as a no-op
 
 A crash or ambiguous live/state mismatch blocks later release attempts for explicit recovery.
 
+Apply distinguishes success, verified previous restoration and manual recovery.
+Verified restoration proves the previous image-env, portal `Config.Image`,
+internal/external health and unchanged staging Nginx ID. Unverified restoration
+preserves pending/candidate evidence and returns `PENDING_RECOVERY_REQUIRED`.
+
+Both bounded crash-window pairs are recognized:
+
+```text
+image-env=pending, live=current
+image-env=current, live=pending
+```
+
+A missing portal fails closed. Commit saves the new ring and outgoing
+`BLOCKED_IMAGE` before deletion, then clears blocked state in a second save only
+after successful exact deletion. Image-env replacement uses a same-directory
+atomic `mv` after canonical root-owned non-symlink path checks.
+
 ## 11. Trusted full smoke
 
 Host-level full smoke belongs to protected release-control code, not private `ai-dev` shell scripts.
@@ -324,6 +356,9 @@ P1_STAGING_MAINTENANCE_ENABLED=true
 ```
 
 It protects every GHCR digest referenced by VPS live/current/rollback/safety/pending/blocked state.
+
+Scheduled cleanup, build-only and normal publication share non-cancelling
+repository-wide concurrency group `p1-react-staging-release-mutation`.
 
 The next release is blocked when cleanup returns:
 

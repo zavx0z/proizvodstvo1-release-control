@@ -99,6 +99,14 @@ Manual review caught and corrected these issues before merge:
 4. Releasing the already-current digest must not rotate duplicate rollback/safety entries. The VPS wrapper has an explicit no-op transaction.
 5. Root-owned staging image env is required and checked against the live container before state-changing actions.
 6. Temporary root state uses atomic files and EXIT/INT/TERM cleanup instead of function-local RETURN traps.
+7. Failed apply distinguishes verified previous restoration from manual recovery
+   and preserves pending evidence when restoration is uncertain.
+8. Commit persists the new ring and outgoing cleanup evidence before deletion.
+9. `STAGING_IMAGE_ENV` is replaced atomically in its canonical parent directory.
+10. Existing GHCR privacy is proven before push; normal publication rejects an
+    absent package.
+11. Every image carries a verified sequence/bootstrap release identity.
+12. Publish and scheduled cleanup share one non-cancelling concurrency boundary.
 
 ## External setup is still absent
 

@@ -105,6 +105,10 @@ No long-lived GHCR push PAT is stored in this repository. Candidate build and pa
 
 The workflow explicitly checks after push that the package visibility is `private` before any live deployment can proceed.
 
+Before the first candidate push it also queries the Packages API. An existing
+package must already be private. A 404 is accepted only for manual `build-only`
+bootstrap; normal publication stops with `GHCR_PACKAGE_ABSENT_BOOTSTRAP_REQUIRED`.
+
 The VPS uses a different pull-only GHCR credential stored only on the VPS. The public workflow never receives the VPS GHCR pull credential.
 
 ## Secret separation by job
@@ -176,6 +180,16 @@ sha-<source_sha>
 
 and leaves the deployed tag empty.
 
+Every final image config carries and later proves a bounded release identity:
+
+```text
+normal: io.proizvodstvo1.release.identity=staging-seq-<N>
+build-only: io.proizvodstvo1.release.identity=bootstrap-sha-<source_sha>
+```
+
+This makes repeated normal releases of one source SHA produce distinct manifest
+digests without adding attestations or artifacts.
+
 The candidate remains under the normal 48-hour cleanup grace window and does not receive a `deployed-seq-*` tag.
 
 ## Transactional deployment
@@ -201,6 +215,16 @@ rollback PREVIOUS_CURRENT
 
 restores the previous committed image without rotating the rollback ring.
 
+A failed apply is reported as restored only after proving the previous
+image-env, live `Config.Image`, internal/external health and unchanged staging
+Nginx container ID. Otherwise `PENDING_IMAGE` and the candidate remain, the
+ledger records `recovery-required`, and the wrapper returns
+`PENDING_RECOVERY_REQUIRED`.
+
+Ring commit saves the new ring and outgoing `BLOCKED_IMAGE` before exact image
+deletion. `STAGING_IMAGE_ENV` is atomically replaced by a root-owned
+`.p1tmp.image-env.*` file created in the same canonical, non-symlink directory.
+
 A repeated publication of the already-current immutable digest is treated as a no-op transaction and does not duplicate or corrupt the rollback/safety ring.
 
 Any ambiguous crash state leaves either an explicit pending state or a live/current mismatch and blocks the next release for manual recovery.
@@ -219,6 +243,8 @@ Any ambiguous crash state leaves either an explicit pending state or a live/curr
 - temporary SSH files live only in `RUNNER_TEMP` and are deleted in `if: always()` cleanup;
 - Docker authentication is removed in `if: always()` cleanup;
 - deployment and final GHCR metadata operations are separated into different jobs.
+- normal publish, build-only and scheduled cleanup share non-cancelling
+  concurrency group `p1-react-staging-release-mutation`.
 
 ## Branch protection
 

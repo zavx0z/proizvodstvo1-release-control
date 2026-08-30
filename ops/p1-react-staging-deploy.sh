@@ -7,6 +7,9 @@ readonly TARGET_RE='^ghcr\.io/zavx0z/proizvodstvo1-react-portal@sha256:[0-9a-f]{
 readonly LEGACY_RE='^10\.66\.0\.10:5000/platform/proizvodstvo1-react-portal@sha256:[0-9a-f]{64}$'
 readonly STATE_BASENAME="release-state.env"
 readonly LEDGER_BASENAME="release-ledger.log"
+readonly APPLY_OK=0
+readonly APPLY_FAILED_PREVIOUS_VERIFIED=10
+readonly APPLY_FAILED_RECOVERY_REQUIRED=20
 
 fail() {
   echo "p1-react-staging-deploy: $*" >&2
@@ -26,7 +29,8 @@ next_ring() {
 }
 
 self_test() {
-  local a b c n action image extra
+  local a b c n action image extra runtime_block deploy_block write_block
+  local deprecated_restore commit_block durable_marker delete_marker
   a="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'a%.0s' {1..64})"
   b="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'b%.0s' {1..64})"
   c="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'c%.0s' {1..64})"
@@ -46,6 +50,26 @@ self_test() {
   [[ "${ring[0]}" == "$n" && "${ring[1]}" == "$a" && "${ring[2]}" == "$b" && "${ring[3]}" == "$c" ]]
   mapfile -t ring < <(next_ring "$a" "$b" "$c" "$a")
   [[ "${ring[0]}" == "$a" && "${ring[1]}" == "$b" && "${ring[2]}" == "$c" && -z "${ring[3]}" ]]
+
+  [[ "$APPLY_OK" == 0 ]]
+  [[ "$APPLY_FAILED_PREVIOUS_VERIFIED" != "$APPLY_FAILED_RECOVERY_REQUIRED" ]]
+  [[ "$APPLY_FAILED_PREVIOUS_VERIFIED" -gt 0 && "$APPLY_FAILED_RECOVERY_REQUIRED" -gt 0 ]]
+
+  runtime_block="$(sed -n '/^restore_previous_portal_verified()/,$p' "$0")"
+  deploy_block="$(sed -n '/^  deploy)/,/^  commit)/p' "$0")"
+  write_block="$(sed -n '/^write_image_env()/,/^}/p' "$0")"
+  deprecated_restore="restore_previous_portal_best""_effort"
+  [[ "$runtime_block" != *"$deprecated_restore"* ]]
+  [[ "$runtime_block" == *"restore_previous_portal_verified"* ]]
+  [[ "$deploy_block" == *'PENDING_IMAGE="$image"'* ]]
+  [[ "$deploy_block" == *'recovery-required deploy "$image"'* ]]
+  [[ "$write_block" == *'mktemp "$IMAGE_ENV_PARENT/.p1tmp.image-env.XXXXXX"'* ]]
+
+  commit_block="$(sed -n '/^  commit)/,/^  rollback)/p' "$0")"
+  durable_marker="$(printf '%s\n' "$commit_block" | grep -n 'Durably commit the new ring before exact outgoing deletion' | cut -d: -f1)"
+  delete_marker="$(printf '%s\n' "$commit_block" | grep -n 'remove_exact_image "$outgoing"' | head -n 1 | cut -d: -f1)"
+  [[ "$durable_marker" =~ ^[0-9]+$ && "$delete_marker" =~ ^[0-9]+$ ]]
+  (( durable_marker < delete_marker ))
 
   echo "P1_VPS_DEPLOY_WRAPPER_SELF_TEST_VALID"
 }
@@ -75,6 +99,19 @@ require_root_dir() {
   (( (8#$mode & 0022) == 0 )) || fail "directory must not be group/other writable: $path"
 }
 
+validate_image_env_target() {
+  local parent="$1" target="$2" mode
+  [[ -d "$parent" && ! -L "$parent" ]] || return 1
+  [[ -f "$target" && ! -L "$target" ]] || return 1
+  [[ "$(realpath -e -- "$parent" 2>/dev/null || true)" == "$parent" ]] || return 1
+  [[ "$(realpath -e -- "$target" 2>/dev/null || true)" == "$target" ]] || return 1
+  [[ "$(stat -c '%u' "$parent")" == 0 && "$(stat -c '%u' "$target")" == 0 ]] || return 1
+  mode="$(stat -c '%a' "$parent")"
+  (( (8#$mode & 0022) == 0 )) || return 1
+  mode="$(stat -c '%a' "$target")"
+  (( (8#$mode & 0022) == 0 )) || return 1
+}
+
 require_root_file "$CONFIG_FILE"
 # shellcheck disable=SC1090 -- fixed, root-owned config path.
 source "$CONFIG_FILE"
@@ -94,9 +131,12 @@ source "$CONFIG_FILE"
 [[ "$MIN_FREE_KB" =~ ^[0-9]+$ && "$MIN_FREE_KB" -ge 1048576 ]] || fail "MIN_FREE_KB must be >= 1 GiB"
 [[ "$STATE_DIR" = /* && "$STAGING_COMPOSE_FILE" = /* && "$STAGING_RUNTIME_ENV" = /* && "$STAGING_IMAGE_ENV" = /* && "$DOCKER_CONFIG_DIR" = /* ]] || fail "all configured paths must be absolute"
 
+command -v realpath >/dev/null 2>&1 || fail "realpath is required"
+readonly IMAGE_ENV_PARENT="$(dirname -- "$STAGING_IMAGE_ENV")"
+validate_image_env_target "$IMAGE_ENV_PARENT" "$STAGING_IMAGE_ENV" || fail "STAGING_IMAGE_ENV and its canonical parent must be root-owned regular paths without symlinks or group/other write"
+
 require_root_file "$STAGING_COMPOSE_FILE"
 require_root_file "$STAGING_RUNTIME_ENV"
-require_root_file "$STAGING_IMAGE_ENV"
 require_root_dir "$DOCKER_CONFIG_DIR"
 require_root_file "$DOCKER_CONFIG_DIR/config.json"
 
@@ -140,7 +180,8 @@ expected_services="$(printf '%s\n%s\n' "$NGINX_SERVICE" "$PORTAL_SERVICE" | LC_A
 exec 9>"$LOCK_FILE"
 flock -n 9 || fail "another staging release operation is active"
 
-find "$STATE_DIR" -maxdepth 1 -type f -user root -name '.p1tmp.*' -mmin +1440 -delete || fail "stale temp cleanup failed"
+find "$STATE_DIR" -maxdepth 1 -type f -user root \( -name '.p1tmp.state.*' -o -name '.p1tmp.ledger.*' \) -mmin +1440 -delete || fail "stale state temp cleanup failed"
+find "$IMAGE_ENV_PARENT" -maxdepth 1 -type f -user root -name '.p1tmp.image-env.*' -mmin +1440 -delete || fail "stale image-env temp cleanup failed"
 
 CURRENT_IMAGE=""
 ROLLBACK_IMAGE=""
@@ -186,13 +227,13 @@ image_env_value() {
 
 write_image_env() {
   local image="$1"
-  valid_known_image "$image" || fail "refusing unknown image for image env"
-  ACTIVE_TMP="$(mktemp "$STATE_DIR/.p1tmp.image-env.XXXXXX")"
-  printf 'PROIZVODSTVO1_REACT_STAGING_IMAGE=%s\n' "$image" > "$ACTIVE_TMP"
-  chmod 0640 "$ACTIVE_TMP"
-  chown root:root "$ACTIVE_TMP"
-  install -m 0640 -o root -g root "$ACTIVE_TMP" "$STAGING_IMAGE_ENV"
-  rm -f -- "$ACTIVE_TMP"
+  valid_known_image "$image" || return 1
+  validate_image_env_target "$IMAGE_ENV_PARENT" "$STAGING_IMAGE_ENV" || return 1
+  ACTIVE_TMP="$(mktemp "$IMAGE_ENV_PARENT/.p1tmp.image-env.XXXXXX")" || return 1
+  printf 'PROIZVODSTVO1_REACT_STAGING_IMAGE=%s\n' "$image" > "$ACTIVE_TMP" || { cleanup_active_tmp; return 1; }
+  chmod 0640 "$ACTIVE_TMP" || { cleanup_active_tmp; return 1; }
+  chown root:root "$ACTIVE_TMP" || { cleanup_active_tmp; return 1; }
+  mv -f -- "$ACTIVE_TMP" "$STAGING_IMAGE_ENV" || { cleanup_active_tmp; return 1; }
   ACTIVE_TMP=""
 }
 
@@ -276,47 +317,78 @@ append_ledger() {
   ACTIVE_TMP=""
 }
 
-restore_previous_portal_best_effort() {
-  local previous="$1" restored=""
-  write_image_env "$previous"
-  "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null 2>&1 || true
-  restored="$(portal_id)"
-  [[ -n "$restored" ]] && check_health "$restored" >/dev/null 2>&1 || true
+restore_previous_portal_verified() {
+  local previous="$1" expected_nginx="$2"
+  local restored_id restored_image restored_env restored_nginx
+
+  write_image_env "$previous" || return 1
+  "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null 2>&1 || return 1
+
+  restored_id="$(portal_id)"
+  [[ -n "$restored_id" ]] || return 1
+  restored_image="$(docker inspect -f '{{.Config.Image}}' "$restored_id" 2>/dev/null || true)"
+  [[ "$restored_image" == "$previous" ]] || return 1
+  restored_env="$(image_env_value 2>/dev/null || true)"
+  [[ "$restored_env" == "$previous" ]] || return 1
+  restored_nginx="$(nginx_id)"
+  [[ -n "$restored_nginx" && "$restored_nginx" == "$expected_nginx" ]] || return 1
+  check_health "$restored_id" || return 1
+  [[ "$(nginx_id)" == "$expected_nginx" ]] || return 1
+
+  echo "PREVIOUS_PORTAL_RESTORE_VERIFIED=$restored_id" >&2
+}
+
+apply_failure_code() {
+  local previous="$1" expected_nginx="$2"
+  if restore_previous_portal_verified "$previous" "$expected_nginx"; then
+    printf '%s\n' "$APPLY_FAILED_PREVIOUS_VERIFIED"
+  else
+    printf '%s\n' "$APPLY_FAILED_RECOVERY_REQUIRED"
+  fi
 }
 
 apply_live_image() {
-  local image="$1" previous="$2" before_nginx after_nginx new_id
+  local image="$1" previous="$2" before_nginx after_nginx new_id new_image failure_code
   valid_known_image "$image" || fail "apply target is outside allowed repositories"
   valid_known_image "$previous" || fail "restore target is outside allowed repositories"
   before_nginx="$(nginx_id)"
   [[ -n "$before_nginx" ]] || fail "staging Nginx container is missing"
 
-  write_image_env "$image"
+  if ! write_image_env "$image"; then
+    failure_code="$(apply_failure_code "$previous" "$before_nginx")"
+    return "$failure_code"
+  fi
   if ! "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null; then
-    restore_previous_portal_best_effort "$previous"
-    return 1
+    failure_code="$(apply_failure_code "$previous" "$before_nginx")"
+    return "$failure_code"
   fi
 
   new_id="$(portal_id)"
   if [[ -z "$new_id" ]]; then
     echo "portal container ID is missing after update; restoring previous portal" >&2
-    restore_previous_portal_best_effort "$previous"
-    return 1
+    failure_code="$(apply_failure_code "$previous" "$before_nginx")"
+    return "$failure_code"
+  fi
+  new_image="$(docker inspect -f '{{.Config.Image}}' "$new_id" 2>/dev/null || true)"
+  if [[ "$new_image" != "$image" ]]; then
+    failure_code="$(apply_failure_code "$previous" "$before_nginx")"
+    return "$failure_code"
   fi
   if ! check_health "$new_id"; then
-    restore_previous_portal_best_effort "$previous"
-    return 1
+    failure_code="$(apply_failure_code "$previous" "$before_nginx")"
+    return "$failure_code"
   fi
 
   after_nginx="$(nginx_id)"
   if [[ "$after_nginx" != "$before_nginx" ]]; then
     echo "staging Nginx container changed during portal update; restoring previous portal" >&2
-    restore_previous_portal_best_effort "$previous"
-    return 1
+    failure_code="$(apply_failure_code "$previous" "$before_nginx")"
+    return "$failure_code"
   fi
 
   echo "PORTAL_CONTAINER_AFTER=$new_id"
   echo "STAGING_NGINX_CONTAINER=$after_nginx"
+  return "$APPLY_OK"
 }
 
 load_state
@@ -329,8 +401,18 @@ if [[ -z "$CURRENT_IMAGE" ]]; then
   [[ "$configured_image" == "$current_live" ]] || fail "initial STAGING_IMAGE_ENV does not match live portal image"
   CURRENT_IMAGE="$current_live"
   save_state
-elif [[ "$configured_image" != "$current_live" ]]; then
-  [[ -n "$PENDING_IMAGE" && "$configured_image" == "$PENDING_IMAGE" && "$current_live" == "$CURRENT_IMAGE" ]] || fail "STAGING_IMAGE_ENV/live mismatch is not an allowed pending crash window"
+elif [[ -z "$PENDING_IMAGE" ]]; then
+  [[ "$configured_image" == "$CURRENT_IMAGE" && "$current_live" == "$CURRENT_IMAGE" ]] || fail "live/image-env state differs from committed current"
+else
+  stable_current=false
+  stable_pending=false
+  pending_env_live_current=false
+  current_env_live_pending=false
+  [[ "$configured_image" == "$CURRENT_IMAGE" && "$current_live" == "$CURRENT_IMAGE" ]] && stable_current=true
+  [[ "$configured_image" == "$PENDING_IMAGE" && "$current_live" == "$PENDING_IMAGE" ]] && stable_pending=true
+  [[ "$configured_image" == "$PENDING_IMAGE" && "$current_live" == "$CURRENT_IMAGE" ]] && pending_env_live_current=true
+  [[ "$configured_image" == "$CURRENT_IMAGE" && "$current_live" == "$PENDING_IMAGE" ]] && current_env_live_pending=true
+  [[ "$stable_current" == true || "$stable_pending" == true || "$pending_env_live_current" == true || "$current_env_live_pending" == true ]] || fail "live/image-env state is not an allowed pending crash window"
 fi
 
 requested="${SSH_ORIGINAL_COMMAND:-}"
@@ -384,20 +466,34 @@ case "$action" in
 
     PENDING_IMAGE="$image"
     save_state
-    if ! apply_live_image "$image" "$CURRENT_IMAGE"; then
-      PENDING_IMAGE=""
-      if remove_exact_image "$image"; then
-        BLOCKED_IMAGE=""
-      else
-        BLOCKED_IMAGE="$image"
-      fi
-      save_state
-      append_ledger apply-failed deploy "$image"
-      if [[ -n "$BLOCKED_IMAGE" ]]; then
-        fail "new portal did not become healthy; previous current restored; CLEANUP_BLOCKED"
-      fi
-      fail "new portal did not become healthy; previous current restored and candidate removed"
+    if apply_live_image "$image" "$CURRENT_IMAGE"; then
+      apply_status="$APPLY_OK"
+    else
+      apply_status="$?"
     fi
+    case "$apply_status" in
+      "$APPLY_OK")
+        ;;
+      "$APPLY_FAILED_PREVIOUS_VERIFIED")
+        PENDING_IMAGE=""
+        BLOCKED_IMAGE="$image"
+        save_state
+        if remove_exact_image "$image"; then
+          BLOCKED_IMAGE=""
+          save_state
+        fi
+        append_ledger apply-failed-previous-verified deploy "$image"
+        if [[ -n "$BLOCKED_IMAGE" ]]; then
+          fail "new portal apply failed; previous portal restore verified; CLEANUP_BLOCKED"
+        fi
+        fail "new portal apply failed; previous portal restore verified; candidate removed"
+        ;;
+      "$APPLY_FAILED_RECOVERY_REQUIRED"|*)
+        save_state
+        append_ledger recovery-required deploy "$image"
+        fail "PENDING_RECOVERY_REQUIRED: failed apply and previous portal restore could not be verified"
+        ;;
+    esac
 
     append_ledger pending deploy "$image"
     echo "STATUS=pending"
@@ -436,15 +532,17 @@ case "$action" in
     ROLLBACK_IMAGE="$new_rollback"
     SAFETY_IMAGE="$new_safety"
     PENDING_IMAGE=""
-    BLOCKED_IMAGE=""
+    BLOCKED_IMAGE="$outgoing"
 
+    # Durably commit the new ring before exact outgoing deletion.
+    save_state
     if [[ -n "$outgoing" ]]; then
-      if ! remove_exact_image "$outgoing"; then
-        BLOCKED_IMAGE="$outgoing"
+      if remove_exact_image "$outgoing"; then
+        BLOCKED_IMAGE=""
+        save_state
       fi
     fi
 
-    save_state
     if [[ -n "$BLOCKED_IMAGE" ]]; then
       append_ledger cleanup-blocked commit "$image"
       echo "CLEANUP_STATUS=CLEANUP_BLOCKED"
@@ -470,7 +568,7 @@ case "$action" in
 
     if [[ "$PENDING_IMAGE" == "$CURRENT_IMAGE" ]]; then
       [[ "$live_now" == "$CURRENT_IMAGE" ]] || fail "no-op pending state has unexpected live image"
-      [[ "$configured_image" == "$CURRENT_IMAGE" ]] || write_image_env "$CURRENT_IMAGE"
+      [[ "$configured_image" == "$CURRENT_IMAGE" ]] || write_image_env "$CURRENT_IMAGE" || fail "cannot restore current image env"
       PENDING_IMAGE=""
       save_state
       append_ledger rollback-noop rollback "$failed_image"
@@ -484,16 +582,17 @@ case "$action" in
     fi
 
     if [[ "$live_now" == "$CURRENT_IMAGE" ]]; then
-      [[ "$configured_image" == "$CURRENT_IMAGE" ]] || write_image_env "$CURRENT_IMAGE"
+      [[ "$configured_image" == "$CURRENT_IMAGE" ]] || write_image_env "$CURRENT_IMAGE" || fail "cannot restore current image env"
       PENDING_IMAGE=""
+      BLOCKED_IMAGE="$failed_image"
+      save_state
       if remove_exact_image "$failed_image"; then
         BLOCKED_IMAGE=""
+        save_state
         cleanup="OK"
       else
-        BLOCKED_IMAGE="$failed_image"
         cleanup="CLEANUP_BLOCKED"
       fi
-      save_state
       append_ledger recovered-before-switch rollback "$failed_image"
       echo "STATUS=ok"
       echo "CLEANUP_STATUS=$cleanup"
@@ -504,17 +603,27 @@ case "$action" in
       exit 0
     fi
 
-    [[ "$live_now" == "$PENDING_IMAGE" && "$configured_image" == "$PENDING_IMAGE" ]] || fail "live/image-env matches neither committed current nor pending image"
-    apply_live_image "$CURRENT_IMAGE" "$PENDING_IMAGE" || fail "rollback failed"
+    [[ "$live_now" == "$PENDING_IMAGE" && ( "$configured_image" == "$PENDING_IMAGE" || "$configured_image" == "$CURRENT_IMAGE" ) ]] || fail "live/image-env matches neither committed current nor an allowed pending crash window"
+    if apply_live_image "$CURRENT_IMAGE" "$PENDING_IMAGE"; then
+      apply_status="$APPLY_OK"
+    else
+      apply_status="$?"
+    fi
+    if [[ "$apply_status" != "$APPLY_OK" ]]; then
+      save_state
+      append_ledger recovery-required rollback "$failed_image"
+      fail "PENDING_RECOVERY_REQUIRED: rollback could not be verified"
+    fi
     PENDING_IMAGE=""
+    BLOCKED_IMAGE="$failed_image"
+    save_state
     if remove_exact_image "$failed_image"; then
       BLOCKED_IMAGE=""
+      save_state
       cleanup="OK"
     else
-      BLOCKED_IMAGE="$failed_image"
       cleanup="CLEANUP_BLOCKED"
     fi
-    save_state
     append_ledger rollback rollback "$failed_image"
     echo "STATUS=ok"
     echo "CLEANUP_STATUS=$cleanup"

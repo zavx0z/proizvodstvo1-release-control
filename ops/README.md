@@ -55,6 +55,10 @@ EXTERNAL_HEALTH_URL=https://staging.proizvodstvo1.ru/health
 PROIZVODSTVO1_REACT_STAGING_IMAGE=<immutable image ref>
 ```
 
+The target and canonical parent must be real root-owned paths without
+group/other write permission. Updates use `.p1tmp.image-env.*` in that same
+parent followed by atomic `mv`; symlink targets and parents are rejected.
+
 Before automation is enabled, Codex must prove the existing fixed staging Compose file reads that variable for only the `portal` service. If it does not, STOP; do not rewrite platform infrastructure as part of credential installation.
 
 ## Transaction model
@@ -67,6 +71,12 @@ The wrapper deliberately separates deployment into three phases:
 
 A runner crash after `deploy` leaves an explicit pending state. A later deployment is blocked with `PENDING_RECOVERY_REQUIRED` instead of silently overwriting evidence.
 
+Failed apply clears pending state and deletes the candidate only after proving
+the previous image-env, live image, internal/external health and unchanged
+staging Nginx ID. Otherwise pending and candidate evidence remain for manual
+recovery. Both bounded image-env/live crash-window pairs are recognized; a
+missing portal container fails closed.
+
 ## Bounded VPS retention
 
 Committed state is only:
@@ -78,6 +88,9 @@ safety
 ```
 
 plus at most one pending or blocked-cleanup image. The outgoing fourth committed image is removed only by exact allowed image reference after proving its Docker image ID is not used by a running container.
+
+The new committed ring and outgoing `BLOCKED_IMAGE` are saved before that delete
+attempt. Successful deletion clears blocked state in a second durable save.
 
 If exact deletion cannot be proven safe, the wrapper stores `BLOCKED_IMAGE` and reports `CLEANUP_BLOCKED`; the next deployment is refused until that exact candidate can be safely removed.
 

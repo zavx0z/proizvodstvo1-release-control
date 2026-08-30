@@ -64,6 +64,11 @@ is used only by explicit-SHA build-only runs. A bootstrap version has no
 `deployed-seq-*` tag and remains subject to the same 48-hour grace and bounded
 orphan cleanup rules.
 
+The final image config carries a unique bounded release identity:
+`staging-seq-<N>` or `bootstrap-sha-<source-sha>`. A repeated source SHA on a new
+normal sequence therefore produces a distinct manifest digest instead of
+accumulating unbounded sequence tags on one digest.
+
 A successfully committed deployment additionally points:
 
 ```text
@@ -85,6 +90,9 @@ Retention target:
 
 A cleanup workflow runs after successful publication and daily when `P1_STAGING_MAINTENANCE_ENABLED=true`.
 
+Cleanup and publish use the same non-cancelling
+`p1-react-staging-release-mutation` concurrency group.
+
 If more than 50 eligible versions remain or any inventory entry cannot be classified safely, cleanup returns:
 
 ```text
@@ -102,6 +110,7 @@ Staging provenance is instead bounded to:
 ```text
 release sequence
 source SHA
+release identity
 OCI revision label
 immutable image digest
 GitHub workflow result
@@ -151,6 +160,10 @@ restores live=A and leaves the committed A/B/C ring intact. The failed pending i
 
 This means the safety image is never discarded before full smoke succeeds.
 
+During commit, the new ring and outgoing `BLOCKED_IMAGE` are saved durably
+before deletion. A crash leaves a consistent ring plus explicit cleanup
+evidence. Successful deletion clears blocked state and saves again.
+
 ## 6. VPS exact image cleanup
 
 The outgoing image is removed only after proving:
@@ -195,6 +208,11 @@ Rules:
 - no symlink traversal;
 - stale temp cleanup is limited to root-owned regular files with that exact prefix older than 24 hours;
 - if ownership/path safety cannot be proven, do not delete and return an error.
+
+`STAGING_IMAGE_ENV` uses a separate atomic rule: its canonical target and parent
+must be root-owned, non-symlink and not group/other writable. The writer creates
+`.p1tmp.image-env.*` in that parent and uses same-filesystem `mv`; stale cleanup
+selects only root-owned regular files with that prefix.
 
 Persistent state contains only:
 

@@ -166,6 +166,7 @@ def run(
             "sequence": "",
             "source_sha": source_sha,
             "image_repository": IMAGE_REPOSITORY,
+            "release_identity": f"bootstrap-sha-{source_sha}",
             "candidate_tag": f"bootstrap-sha-{source_sha}",
             "source_tag": f"sha-{source_sha}",
             "deployed_tag": "",
@@ -181,6 +182,7 @@ def run(
             "sequence": sequence,
             "source_sha": source_sha,
             "image_repository": IMAGE_REPOSITORY,
+            "release_identity": f"staging-seq-{sequence}",
             "candidate_tag": f"seq-{sequence}",
             "source_tag": f"sha-{source_sha}",
             "deployed_tag": f"deployed-seq-{sequence}",
@@ -263,10 +265,24 @@ def self_test() -> None:
             "sequence": "2",
             "source_sha": source_sha,
             "image_repository": IMAGE_REPOSITORY,
+            "release_identity": "staging-seq-2",
             "candidate_tag": "seq-2",
             "source_tag": f"sha-{source_sha}",
             "deployed_tag": "deployed-seq-2",
         }
+
+        repeated = json.loads(path.read_text("utf-8"))
+        repeated["sequence"] = 3
+        path.write_text(json.dumps(repeated), "utf-8")
+        repeated_output = root / "repeated.out"
+        run(path, source, None, str(repeated_output))
+        repeated_values = dict(
+            line.split("=", 1)
+            for line in repeated_output.read_text("utf-8").splitlines()
+        )
+        assert repeated_values["source_sha"] == normal["source_sha"]
+        assert repeated_values["release_identity"] == "staging-seq-3"
+        assert repeated_values["release_identity"] != normal["release_identity"]
 
         bootstrap_output = root / "bootstrap.out"
         run(
@@ -283,6 +299,7 @@ def self_test() -> None:
             "sequence": "",
             "source_sha": source_sha,
             "image_repository": IMAGE_REPOSITORY,
+            "release_identity": f"bootstrap-sha-{source_sha}",
             "candidate_tag": f"bootstrap-sha-{source_sha}",
             "source_tag": f"sha-{source_sha}",
             "deployed_tag": "",

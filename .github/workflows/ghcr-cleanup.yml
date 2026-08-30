@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: p1-react-staging-ghcr-cleanup
+  group: p1-react-staging-release-mutation
   cancel-in-progress: false
 
 jobs:
