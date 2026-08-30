@@ -41,7 +41,7 @@ Exact fields:
 
 No additional fields are accepted.
 
-`sequence` is monotonic and increments by exactly one for each release request. A no-op release may keep the same functional application while increasing `sequence`; this is used for controlled pipeline/rollback verification.
+`sequence` increments by exactly one for each release request. A functionally no-op release may keep the same source SHA while increasing `sequence`; this is used for controlled release-path and rollback verification.
 
 ## 3. Release Pull Request
 
@@ -51,10 +51,10 @@ A normal release PR:
 - branch name is `release/staging-seq-<N>`;
 - changes exactly `release/staging.json`;
 - sets `<N>` equal to manifest `sequence`;
-- increments the base manifest sequence by exactly one;
+- increments base sequence by exactly one;
 - does not change workflow, docs or policy files.
 
-The trusted-base `Release manifest guard` validates this without using secrets.
+The trusted-base `Release manifest guard` validates this without secrets.
 
 ## 4. Maintenance Pull Request
 
@@ -66,9 +66,9 @@ A maintenance PR:
 - never changes `release/staging.json` in the same PR;
 - may change only control paths explicitly allowed by the existing base guard.
 
-`Release manifest guard` executes from the protected base. `Release-control code self-test` executes the proposed maintenance code. Both are required by branch protection.
+The base `Release manifest guard` evaluates the PR through `pull_request_target`. The proposed control code is separately exercised by `Release-control code self-test`. Both are required by protected public `main`.
 
-## 5. Publish trigger
+## 5. Publish modes
 
 Canonical workflow:
 
@@ -76,47 +76,70 @@ Canonical workflow:
 .github/workflows/publish-staging.yml
 ```
 
-It runs only on a `push` to protected `main` when `release/staging.json` changes. Maintenance merges do not trigger application publication.
+There are only two modes.
 
-The workflow uses GitHub-hosted ephemeral runners only. It is additionally blocked unless the separately configured repository variable is exactly:
+### Normal publication
+
+A normal publication starts only on `push` to protected `main` when `release/staging.json` changes and additionally requires:
 
 ```text
 P1_STAGING_PUBLISH_ENABLED=true
 ```
 
-This variable is an operational gate, not a replacement for branch protection.
+### GHCR build-only bootstrap
 
-## 6. Private source proof
+Manual `workflow_dispatch` supports only:
 
-The publisher checks out only:
+```text
+mode=build-only
+```
+
+and requires:
+
+```text
+P1_STAGING_BUILD_ONLY_ENABLED=true
+```
+
+Build-only validates source access, repeats application gates, builds the exact image, creates/verifies the private GHCR package and tests the image. It has no VPS deployment job and cannot mutate live staging.
+
+## 6. Private source proof and immutable snapshots
+
+The build job checks out only:
 
 ```text
 zavx0z/proizvodstvo1
 branch: ai-dev
 ```
 
-through a dedicated read-only deploy key.
-
-It then proves:
+through a dedicated read-only deploy key, then proves:
 
 ```text
 checked-out ai-dev HEAD == release/staging.json:source_sha
 ```
 
-If they differ, publication stops before application checks, image build or deployment.
+If they differ, publication stops before image build or deployment.
 
-Required source-side release files include:
+Required source release files are:
 
 ```text
 app/ai/Dockerfile.release
-app/ai/ops/staging-smoke.sh
+app/ai/Dockerfile.release.dockerignore
 ```
 
-Therefore source-side release-contract PR #6 must be accepted into `ai-dev` before the first GHCR publication can succeed. This does not authorize `proizvodstvo1/main` or production cutover.
+Therefore source-side PR #6 must be separately accepted into `ai-dev` before the first GHCR build can succeed. This is not a merge into private `main` and not production cutover.
+
+The workflow rejects Git symlinks/submodules, freezes the accepted source SHA into one `git archive`, then extracts two independent snapshots:
+
+```text
+p1-test-source
+p1-build-source
+```
+
+Application checks run only against the test snapshot. The release image is built only from the untouched build snapshot created from the same frozen archive after the tests. Test mutation therefore cannot alter the build context.
 
 ## 7. Application gates
 
-The GitHub-hosted publisher repeats application checks with the pinned Bun 1.4.0 image:
+Checks run with pinned Bun:
 
 ```text
 oven/bun:1.4.0-debian@sha256:0e74e9bd11cf47eb67ac4d8698ed1b10d378fa4a5f4a5f1146556087649b607f
@@ -131,17 +154,17 @@ At minimum:
 - legacy portal build compatibility;
 - React install/tests/typecheck/production build.
 
-No Artel, SSO, Email, WebRTC or general platform release suite is part of this application publish.
+No Artel, SSO, Email, WebRTC or platform-wide release suite is part of ordinary application publish.
 
 ## 8. Image build and GHCR
 
-The only target package is:
+Only this package is allowed:
 
 ```text
 ghcr.io/zavx0z/proizvodstvo1-react-portal
 ```
 
-The GitHub-hosted job uses only its job-scoped `GITHUB_TOKEN` with `packages: write`; no long-lived GHCR push PAT is stored in the public repository.
+The GitHub-hosted build job uses its job-scoped `GITHUB_TOKEN` with `packages: write`; no long-lived GHCR push PAT is stored in the public repository.
 
 Candidate traceability tags:
 
@@ -150,11 +173,15 @@ seq-<sequence>
 sha-<source_sha>
 ```
 
-After successful full smoke and VPS commit, the same manifest also receives:
+Before any deployment, the workflow verifies through GitHub Packages API that the package visibility is exactly `private`.
+
+After a successful committed deployment, the finalize job adds:
 
 ```text
 deployed-seq-<sequence>
 ```
+
+to the same immutable digest and verifies the tag did not change that digest.
 
 Deployment itself always uses:
 
@@ -162,11 +189,32 @@ Deployment itself always uses:
 ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:<digest>
 ```
 
-Attestations are disabled for staging v1 to avoid untagged manifest accumulation; source SHA, release sequence, OCI revision label, image digest and GitHub workflow evidence form the staging provenance chain.
+Staging v1 disables BuildKit SBOM/provenance side manifests to avoid untagged OCI accumulation. Staging provenance remains bounded to sequence, source SHA, OCI revision label, image digest and GitHub workflow evidence.
 
-## 9. Transactional VPS deployment
+## 9. Secret isolation by job
 
-The public workflow never has an arbitrary VPS shell. A dedicated SSH key is restricted server-side to the reviewed root-owned wrapper in:
+The normal pipeline is split so application source and VPS deployment credentials never coexist in the same job:
+
+```text
+vps-preflight
+  -> restricted VPS key, public control code only
+
+build
+  -> private-source read-only key + job-scoped GHCR token
+  -> no VPS private key
+
+deploy
+  -> restricted VPS key, protected public control code only
+  -> no private source checkout
+
+finalize
+  -> job-scoped GHCR token + protected public control code
+  -> no VPS key and no private source key
+```
+
+## 10. Transactional VPS deployment
+
+The public workflow never has an arbitrary VPS shell. A dedicated SSH key is restricted to the reviewed root-owned wrapper:
 
 ```text
 ops/p1-react-staging-deploy.sh
@@ -184,22 +232,22 @@ and service:
 portal
 ```
 
-while also proving the staging Nginx container identity does not change.
+while proving the configured staging Nginx container does not change.
 
-Deployment has three phases:
+The committed ring is not rotated until the protected full smoke succeeds:
 
 ```text
 deploy IMAGE
-  -> pull exact GHCR digest
+  -> pull exact digest
   -> disk guard
   -> update portal only
   -> health
-  -> PENDING_IMAGE
+  -> record pending
 
-GitHub full staging smoke
+trusted public-control full smoke
 
 commit IMAGE
-  -> finalize current/rollback/safety ring
+  -> rotate current / rollback / safety
   -> exact bounded VPS image cleanup
 ```
 
@@ -209,13 +257,30 @@ If full smoke fails:
 rollback PREVIOUS_CURRENT
 ```
 
-restores the previously committed image before the rollback ring is rotated.
+restores the previously committed image and preserves the pre-release rollback/safety ring.
 
-A runner crash after `deploy` leaves explicit pending state and blocks the next release with `PENDING_RECOVERY_REQUIRED` rather than silently overwriting evidence.
+A repeated release of the already-current immutable digest is handled as a no-op transaction and does not duplicate the rollback ring.
 
-## 10. Bounded cleanup
+A crash or ambiguous live/state mismatch blocks later release attempts for explicit recovery.
 
-Cleanup is mandatory both before build and after a successful committed deployment.
+## 11. Trusted full smoke
+
+Host-level full smoke belongs to protected release-control code, not private `ai-dev` shell scripts.
+
+It verifies:
+
+- `/health` = 200, status `ok`, `seoIndexable=false`;
+- `/`, `/request`, `/institute` = 200;
+- `X-Robots-Tag: noindex, nofollow` on staging pages;
+- no not-found fallback;
+- `/robots.txt` = 200, contains `User-agent: *` and `Allow: /`, does not contain `Disallow: /`, and exposes the noindex header;
+- `/sitemap.xml` = 404.
+
+The same trusted smoke runs after rollback before a failed deployment exits.
+
+## 12. Bounded cleanup
+
+Cleanup is mandatory before normal source build and after a successful committed deployment.
 
 GHCR policy is implemented by:
 
@@ -224,13 +289,13 @@ scripts/ghcr_cleanup.py
 .github/workflows/ghcr-cleanup.yml
 ```
 
-The scheduled cleanup job runs only when:
+The scheduled cleanup job is inert unless:
 
 ```text
 P1_STAGING_MAINTENANCE_ENABLED=true
 ```
 
-It queries the restricted VPS `state` command and protects every GHCR digest referenced by live/current/rollback/safety/pending/blocked state.
+It protects every GHCR digest referenced by VPS live/current/rollback/safety/pending/blocked state.
 
 The next release is blocked when cleanup returns:
 
@@ -238,15 +303,15 @@ The next release is blocked when cleanup returns:
 CLEANUP_BLOCKED
 ```
 
-No global Docker prune command is permitted.
+No broad Docker prune or Compose down is ever permitted.
 
-## 11. Credential boundaries
+## 13. External installation remains separate
 
-Expected narrow credentials and variables are documented in `docs/SECURITY.md` and installed only through a separate external task after this control-code PR is reviewed.
+Credentials, package permissions and root-owned VPS installation are created only through a separate external Codex task after this control-code PR is reviewed and separately authorized for merge.
 
-No secret, key, GHCR package permission or VPS configuration is created by merging the control-code PR itself.
+Merging this maintenance PR alone creates no secrets, keys, GHCR package or VPS changes and does not trigger publication because `release/staging.json` is unchanged.
 
-## 12. Never part of ordinary staging publish
+## 14. Never part of ordinary staging publish
 
 - `zavx0z/proizvodstvo1/main`;
 - Production №1 containers/images;
