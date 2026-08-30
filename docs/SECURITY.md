@@ -7,15 +7,18 @@ The public release-control repository contains only public metadata and reviewed
 ```text
 protected public main
   -> exact release/staging.json
-  -> GitHub-hosted runner
+  -> restricted VPS state preflight
   -> read-only private-source deploy key
   -> exact ai-dev HEAD == manifest source_sha
-  -> repeated application checks
+  -> immutable git-archive snapshot
+  -> repeated application checks in isolated container
+  -> untouched second build snapshot
   -> private GHCR package
   -> immutable image digest
-  -> forced-command VPS key
-  -> fixed root-owned deploy wrapper
-  -> only proizvodstvo1-react-staging.portal
+  -> restricted forced-command VPS deployment
+  -> protected control-side full smoke
+  -> transactional commit or rollback
+  -> exact bounded cleanup
 ```
 
 ## Public information
@@ -29,11 +32,11 @@ The following may be public:
 - workflow/check status;
 - non-secret cleanup evidence.
 
-No source content is copied into this repository.
+No application source content is copied into this repository.
 
-## GitHub Actions secrets
+## GitHub Actions secrets and variables
 
-The publish workflow is designed to require only narrowly scoped external credentials:
+Expected secrets:
 
 ```text
 P1_SOURCE_DEPLOY_KEY
@@ -41,84 +44,184 @@ P1_VPS_DEPLOY_KEY
 P1_VPS_KNOWN_HOSTS
 ```
 
-and non-secret repository variables:
+Expected non-secret variables:
 
 ```text
+P1_STAGING_BUILD_ONLY_ENABLED
 P1_STAGING_PUBLISH_ENABLED
 P1_STAGING_MAINTENANCE_ENABLED
 P1_VPS_DEPLOY_HOST
 P1_VPS_DEPLOY_USER
 ```
 
-The exact final names may be adjusted once during installation, but the privileges must not be broadened.
+All enabling variables remain false or absent until the corresponding installation/acceptance stage is complete.
 
 ### Private source key
 
-`P1_SOURCE_DEPLOY_KEY` is a read-only deploy key bound only to `zavx0z/proizvodstvo1`. It must have no write permission and no access to other repositories.
+`P1_SOURCE_DEPLOY_KEY` is a read-only deploy key bound only to `zavx0z/proizvodstvo1`. It has no write permission and no access to other repositories.
 
-The workflow checks out only branch `ai-dev`, immediately compares its exact HEAD with `release/staging.json:source_sha`, and fails before build if they differ.
+The build job checks out only branch `ai-dev`, proves its exact HEAD equals `release/staging.json:source_sha`, and immediately creates a Git archive snapshot.
+
+Two independent directories are extracted from the same frozen archive:
+
+```text
+p1-test-source
+p1-build-source
+```
+
+Application tests may mutate only `p1-test-source`. The Docker release image is built only from the untouched `p1-build-source`, so test-side mutation cannot alter the image candidate.
+
+The source tree rejects Git symlinks/submodules before extraction.
 
 ### VPS key
 
-`P1_VPS_DEPLOY_KEY` authenticates only the dedicated staging deploy account. The public key is restricted server-side to the fixed root-owned forced command described in `ops/README.md`.
+`P1_VPS_DEPLOY_KEY` authenticates only a dedicated staging deploy account. Its public key is restricted server-side to the fixed root-owned forced command documented in `ops/README.md`.
 
 Possession of this key must not allow:
 
-- an interactive shell;
+- interactive shell;
 - arbitrary sudo;
-- arbitrary Docker commands;
+- arbitrary Docker command;
 - Production №1 mutation;
 - Artel mutation;
 - central ingress mutation;
 - DNS/TLS mutation;
-- arbitrary image repositories.
+- arbitrary image repository.
 
-### GHCR write credential
+### GHCR write access
 
-No long-lived GHCR push token is stored in the repository. GitHub-hosted publication uses the job-scoped `GITHUB_TOKEN` with `packages: write` for the exact package associated with this repository.
+No long-lived GHCR push PAT is stored in this repository. Candidate build and package maintenance use the job-scoped `GITHUB_TOKEN` with `packages: write`.
 
-The package must remain private. Package access is configured separately and verified before publication is enabled.
+The workflow explicitly checks after push that the package visibility is `private` before any live deployment can proceed.
 
-The VPS uses a different pull-only GHCR credential stored only on the VPS. The public workflow never receives the VPS GHCR credential.
+The VPS uses a different pull-only GHCR credential stored only on the VPS. The public workflow never receives the VPS GHCR pull credential.
+
+## Secret separation by job
+
+The publisher deliberately separates credentials across jobs.
+
+### `vps-preflight`
+
+Has access to the restricted VPS key only. It has no private-source deploy key and no application source checkout.
+
+### `build`
+
+Has the private-source deploy key and job-scoped GHCR write token. It never receives the VPS private key. It produces an immutable digest and candidate only.
+
+### `deploy`
+
+Checks out only protected public release-control code. It has the restricted VPS key but no private application source checkout and executes no private-source shell script on the host.
+
+### `finalize`
+
+Uses only protected public release-control code plus the job-scoped GHCR token. It receives committed VPS ring digests as job outputs and never receives the VPS key or private-source key.
+
+This prevents one source-controlled application test or Docker build from running in the same job that holds the VPS deployment key.
+
+## Trusted full staging smoke
+
+The full post-deployment smoke is embedded in the protected public `publish-staging.yml`, not taken from `ai-dev`.
+
+It verifies:
+
+- `/health` 200, `status=ok`, `seoIndexable=false`;
+- `/`, `/request`, `/institute` return 200;
+- public HTML responses carry `X-Robots-Tag: noindex, nofollow`;
+- no not-found fallback appears;
+- `/robots.txt` permits crawling so noindex can be observed and also carries the noindex header;
+- `/sitemap.xml` is 404 while staging is non-indexable.
+
+The same protected smoke is repeated after rollback before a failed release terminates.
+
+## Build-only GHCR bootstrap
+
+`workflow_dispatch` supports only one manual mode:
+
+```text
+build-only
+```
+
+It requires:
+
+```text
+P1_STAGING_BUILD_ONLY_ENABLED=true
+```
+
+This mode may validate the private-source key, build the exact candidate, create/verify the private GHCR package and run image health checks, but it has no VPS deployment job. It is the intended first package-bootstrap path.
+
+The candidate remains under the normal 48-hour cleanup grace window and does not receive a `deployed-seq-*` tag.
+
+## Transactional deployment
+
+A normal manifest push uses the root-owned wrapper transaction:
+
+```text
+deploy IMAGE
+  -> PENDING_IMAGE
+  -> portal health only
+
+protected GitHub full smoke
+
+commit IMAGE
+  -> rotate current / rollback / safety
+```
+
+If full smoke fails:
+
+```text
+rollback PREVIOUS_CURRENT
+```
+
+restores the previous committed image without rotating the rollback ring.
+
+A repeated publication of the already-current immutable digest is treated as a no-op transaction and does not duplicate or corrupt the rollback/safety ring.
+
+Any ambiguous crash state leaves either an explicit pending state or a live/current mismatch and blocks the next release for manual recovery.
 
 ## Workflow hardening
 
-- third-party Actions are not required;
-- `actions/checkout` is pinned by full commit SHA;
-- publish runs only on `push` to protected `main` when `release/staging.json` changes;
-- source build uses the exact checked-out private commit;
-- all resulting deployment references use `@sha256:<digest>`;
-- no Actions cache or uploaded binary artifacts;
 - GitHub-hosted ephemeral runners only;
-- SSH private-key files are created only under `RUNNER_TEMP` and removed in an `if: always()` step;
-- Docker logout runs in `if: always()` cleanup;
-- the deployment wrapper uses a pending/commit transaction so full smoke happens before rollback-ring rotation.
+- no self-hosted release runner;
+- third-party Actions are not required;
+- every `actions/checkout` use is pinned by full commit SHA;
+- publish on `push` to protected `main` only when `release/staging.json` changes;
+- manual mode is build-only and cannot deploy;
+- no Actions cache or uploaded binary artifacts;
+- staging BuildKit SBOM/provenance side manifests disabled to keep retention deterministic;
+- all resulting live deployment references use full `@sha256:<digest>`;
+- temporary SSH files live only in `RUNNER_TEMP` and are deleted in `if: always()` cleanup;
+- Docker authentication is removed in `if: always()` cleanup;
+- deployment and final GHCR metadata operations are separated into different jobs.
 
 ## Branch protection
 
-Public `main` is the release authority and must remain protected with:
+Public `main` is the release authority and is independently verified protected with:
 
 - PR required;
+- approvals required: 0;
 - strict required status checks;
 - exact checks `Release manifest guard` and `Release-control code self-test`;
 - force push disabled;
 - branch deletion disabled;
 - administrator bypass disabled;
-- conversation resolution and linear history enabled where supported.
+- conversation resolution enabled;
+- linear history enabled.
 
-If these properties are not true, do not publish.
+If these properties change, publication must stop.
 
 ## Stop conditions
 
 Publication is blocked when any of the following is true:
 
-- source deploy key missing or too broad;
-- `ai-dev` HEAD differs from the manifest source SHA;
+- source deploy key missing or broader than read-only access to the one private source repository;
+- `ai-dev` HEAD differs from manifest `source_sha`;
 - application checks fail;
-- GHCR package visibility or access is not proven private/scoped;
+- GHCR package visibility is not proven private;
+- VPS pull permission is not limited to the expected package;
 - VPS forced-command restriction is not proven;
-- VPS reports a pending recovery state;
+- VPS ring drifts between preflight and deployment;
+- VPS reports pending or blocked cleanup state;
 - disk guard fails;
 - GHCR or VPS cleanup returns `CLEANUP_BLOCKED`;
 - immutable digest cannot be resolved;
-- full staging smoke fails and rollback cannot be proven healthy.
+- trusted full smoke fails and rollback cannot be proven healthy.
