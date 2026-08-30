@@ -43,6 +43,7 @@ jobs:
               "docs/RELEASE_CONTRACT.md",
               "docs/RETENTION_AND_CLEANUP.md",
               "release/staging.json",
+              "scripts/release_guard.py",
               ".github/CODEOWNERS",
               ".github/workflows/bootstrap-check.yml",
               ".github/workflows/release-manifest-guard.yml",
@@ -59,10 +60,8 @@ jobs:
               ["git", "diff", "--name-only", os.environ["BASE_SHA"], os.environ["HEAD_SHA"]],
               text=True,
           ).splitlines())
-          expected_changed = expected - {"README.md"}
-          expected_changed.add("README.md")
-          if changed != expected_changed:
-              raise SystemExit(f"bootstrap diff mismatch: {sorted(changed)}")
+          if changed != expected:
+              raise SystemExit(f"bootstrap diff mismatch: expected={sorted(expected)} actual={sorted(changed)}")
 
           tree = subprocess.check_output(
               ["git", "ls-tree", "-r", os.environ["HEAD_SHA"]], text=True
@@ -114,3 +113,6 @@ jobs:
 
           print("P1_RELEASE_CONTROL_BOOTSTRAP_VALID")
           PY
+
+      - name: Exercise future trusted-base guard
+        run: python3 scripts/release_guard.py --self-test
