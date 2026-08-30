@@ -1,0 +1,211 @@
+name: Release manifest guard
+
+on:
+  pull_request_target:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-control-guard-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: Release manifest guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate PR from trusted base workflow
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_EVENT_PATH_VALUE: ${{ github.event_path }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import datetime as dt
+          import json
+          import os
+          import pathlib
+          import re
+          import urllib.parse
+          import urllib.request
+
+          repo = os.environ["GH_REPOSITORY"]
+          owner = repo.split("/", 1)[0]
+          token = os.environ["GH_TOKEN"]
+          event = json.loads(pathlib.Path(os.environ["GH_EVENT_PATH_VALUE"]).read_text("utf-8"))
+          pr = event["pull_request"]
+          number = pr["number"]
+          head_ref = pr["head"]["ref"]
+          head_sha = pr["head"]["sha"]
+          head_repo = (pr["head"].get("repo") or {}).get("full_name")
+          base_sha = pr["base"]["sha"]
+          author = pr["user"]["login"]
+
+          def api(path):
+              req = urllib.request.Request(
+                  "https://api.github.com" + path,
+                  headers={
+                      "Accept": "application/vnd.github+json",
+                      "Authorization": "Bearer " + token,
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "proizvodstvo1-release-control-guard",
+                  },
+              )
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+
+          files = api(f"/repos/{repo}/pulls/{number}/files?per_page=100&page=1")
+          if len(files) >= 100:
+              raise SystemExit("PR is too large for release-control")
+          changed = {item["filename"]: item for item in files}
+          if not changed:
+              raise SystemExit("empty PR is not a release-control change")
+
+          if head_repo != repo:
+              raise SystemExit("release-control PRs must originate from this repository, not a fork")
+
+          def fetch_text(path, ref):
+              encoded_path = urllib.parse.quote(path, safe="/")
+              data = api(f"/repos/{repo}/contents/{encoded_path}?ref={urllib.parse.quote(ref, safe='')}")
+              if data.get("type") != "file" or data.get("encoding") != "base64":
+                  raise SystemExit(f"expected regular file content for {path}")
+              raw = base64.b64decode(data["content"], validate=True)
+              if len(raw) > 131072:
+                  raise SystemExit(f"file too large: {path}")
+              if b"\x00" in raw:
+                  raise SystemExit(f"binary content rejected: {path}")
+              return raw.decode("utf-8")
+
+          def validate_text_safety(path, text):
+              forbidden = [
+                  r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----",
+                  r"github_pat_[A-Za-z0-9_]{20,}",
+                  r"gh[pousr]_[A-Za-z0-9]{20,}",
+              ]
+              for pattern in forbidden:
+                  if re.search(pattern, text):
+                      raise SystemExit(f"possible secret material rejected in {path}")
+
+          def validate_manifest(text):
+              value = json.loads(text)
+              keys = {
+                  "schema", "environment", "source_repository", "source_ref",
+                  "source_sha", "sequence", "requested_at", "summary",
+              }
+              if set(value) != keys:
+                  raise SystemExit("manifest keys do not match the exact schema")
+              if type(value["schema"]) is not int or value["schema"] != 1:
+                  raise SystemExit("manifest schema must be integer 1")
+              if value["environment"] != "staging":
+                  raise SystemExit("manifest environment must be staging")
+              if value["source_repository"] != "zavx0z/proizvodstvo1":
+                  raise SystemExit("manifest source_repository is fixed")
+              if value["source_ref"] != "refs/heads/ai-dev":
+                  raise SystemExit("manifest source_ref is fixed")
+              if not isinstance(value["source_sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", value["source_sha"]):
+                  raise SystemExit("manifest source_sha must be 40 lowercase hex")
+              if type(value["sequence"]) is not int or value["sequence"] < 1:
+                  raise SystemExit("manifest sequence must be a positive integer")
+              stamp = value["requested_at"]
+              if not isinstance(stamp, str) or not stamp.endswith("Z"):
+                  raise SystemExit("manifest requested_at must be RFC3339 UTC ending in Z")
+              parsed = dt.datetime.fromisoformat(stamp[:-1] + "+00:00")
+              if parsed.utcoffset() != dt.timedelta(0):
+                  raise SystemExit("manifest requested_at must be UTC")
+              summary = value["summary"]
+              if not isinstance(summary, str) or not (1 <= len(summary) <= 160):
+                  raise SystemExit("manifest summary length must be 1..160")
+              if "\n" in summary or "\r" in summary or not summary.isprintable():
+                  raise SystemExit("manifest summary must be one printable line")
+              validate_text_safety("release/staging.json", text)
+              return value
+
+          release_match = re.fullmatch(r"release/staging-seq-([1-9][0-9]*)", head_ref)
+          if release_match:
+              if set(changed) != {"release/staging.json"}:
+                  raise SystemExit("release PR must change exactly release/staging.json")
+              if changed["release/staging.json"]["status"] != "modified":
+                  raise SystemExit("release/staging.json must be modified, not added/deleted/renamed")
+
+              base_manifest = validate_manifest(fetch_text("release/staging.json", base_sha))
+              head_manifest = validate_manifest(fetch_text("release/staging.json", head_sha))
+              expected_sequence = base_manifest["sequence"] + 1
+              branch_sequence = int(release_match.group(1))
+              if head_manifest["sequence"] != expected_sequence:
+                  raise SystemExit(f"sequence must increment by exactly one to {expected_sequence}")
+              if branch_sequence != head_manifest["sequence"]:
+                  raise SystemExit("branch sequence does not match manifest sequence")
+
+              print(
+                  "P1_RELEASE_MANIFEST_VALID "
+                  f"sequence={head_manifest['sequence']} source_sha={head_manifest['source_sha']}"
+              )
+              raise SystemExit(0)
+
+          if head_ref.startswith("maintenance/"):
+              if author != owner:
+                  raise SystemExit("maintenance PR must be authored by repository owner")
+              if "release/staging.json" in changed:
+                  raise SystemExit("maintenance PR must not change the release manifest")
+
+              allowed = {
+                  "README.md",
+                  "AGENTS.md",
+                  ".github/CODEOWNERS",
+                  ".github/pull_request_template.md",
+                  ".github/workflows/bootstrap-check.yml",
+                  ".github/workflows/release-manifest-guard.yml",
+                  ".github/workflows/publish-staging.yml",
+                  ".github/workflows/ghcr-cleanup.yml",
+                  "docs/RELEASE_CONTRACT.md",
+                  "docs/RETENTION_AND_CLEANUP.md",
+                  "docs/CURRENT_STATE.md",
+                  "docs/SECURITY.md",
+              }
+              unexpected = sorted(set(changed) - allowed)
+              if unexpected:
+                  raise SystemExit(f"maintenance PR contains unexpected paths: {unexpected}")
+              if len(changed) > 12:
+                  raise SystemExit("maintenance PR changes too many files")
+
+              critical = {
+                  "README.md",
+                  "AGENTS.md",
+                  ".github/CODEOWNERS",
+                  ".github/workflows/release-manifest-guard.yml",
+                  "docs/RELEASE_CONTRACT.md",
+                  "docs/RETENTION_AND_CLEANUP.md",
+              }
+              removed_critical = sorted(
+                  path for path, item in changed.items()
+                  if path in critical and item["status"] == "removed"
+              )
+              if removed_critical:
+                  raise SystemExit(f"critical release-control files cannot be deleted: {removed_critical}")
+
+              for path, item in changed.items():
+                  if item["status"] == "removed":
+                      continue
+                  text = fetch_text(path, head_sha)
+                  validate_text_safety(path, text)
+
+              print(f"P1_RELEASE_MAINTENANCE_VALID files={len(changed)}")
+              raise SystemExit(0)
+
+          raise SystemExit(
+              "branch must be release/staging-seq-<N> or owner-only maintenance/<slug>"
+          )
+          PY
