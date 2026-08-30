@@ -8,31 +8,29 @@ Snapshot: 2026-08-30. Always re-check GitHub and live infrastructure before muta
 repository: zavx0z/proizvodstvo1-release-control
 visibility: public
 default branch: main
-main SHA before this maintenance PR:
+protected main before this maintenance PR:
 055c67b563140794c9efaeeff4aeb97d1aac22f2
 ```
 
-Branch protection is active and independently verified through the GitHub branch API:
+GitHub branch protection is independently verified:
 
 ```text
 protected=true
 enforcement=everyone
+PR required=true
+required approvals=0
+strict checks=true
 required checks:
 - Release manifest guard
 - Release-control code self-test
+force push=false
+deletion=false
+admin bypass=false
+conversation resolution=true
+linear history=true
 ```
 
-Codex Issue #13 reported and GitHub confirmed:
-
-- PR required;
-- approvals required: 0;
-- strict/up-to-date status checks;
-- force-push disabled;
-- deletion disabled;
-- administrator bypass disabled;
-- conversation resolution enabled;
-- linear history enabled;
-- all temporary probe/bootstrap/fix branches removed.
+Codex Issue #13 is completed and closed. All temporary bootstrap/probe/fix branches were removed; before this maintenance branch was created, public repo contained only `main`.
 
 ## Private source baseline
 
@@ -44,9 +42,9 @@ zavx0z/proizvodstvo1/ai-dev:
 657b77d5839385775b0c1a43d2621a0ce9c3a628
 ```
 
-Private source-side PR #6 remains open/draft and is not merged. It contains the application-owned release Dockerfile, staging smoke and canonical source-side architecture for this release model.
+Private source-side PR #6 remains open/draft and not merged. It contains the application-owned release Dockerfile and Dockerfile-specific ignore file required by the GHCR publisher.
 
-The first GHCR publication cannot be enabled until the exact required release files are accepted into `ai-dev` through a separately authorized merge. This is not a merge into private `main` and not production cutover.
+A real GHCR build cannot pass source preflight until those release files are separately accepted into `ai-dev`. This is not a merge into private `main` and not production cutover.
 
 ## Live staging baseline
 
@@ -58,70 +56,83 @@ https://staging.proizvodstvo1.ru
 source SHA:
 657b77d5839385775b0c1a43d2621a0ce9c3a628
 
-legacy isolated-registry image:
+current image:
 10.66.0.10:5000/platform/proizvodstvo1-react-portal@sha256:8f701237413da3fe1c663e5b0c14e67b52e6a2c3bb82bad92383880f00b82b1c
 ```
 
-Production №1, Artel, central ingress, staging Nginx, DNS and TLS have not been changed by release-control bootstrap.
+Production №1, Artel, central ingress, staging Nginx, DNS and TLS remain outside release-control bootstrap and have not been changed by it.
 
-## Current maintenance PR purpose
-
-Branch:
+## Current maintenance PR
 
 ```text
-maintenance/publish-pipeline-v1
+PR #5
+branch: maintenance/publish-pipeline-v1
+base: protected public main
 ```
 
-This PR adds reviewed but inert control code for:
+The PR changes control code only and does **not** change `release/staging.json`, so merging it alone cannot trigger an application build or deployment.
 
-- manifest/private-source preflight;
-- GitHub-hosted exact-source application gates;
-- private GHCR image build by full digest;
-- transactional restricted VPS deploy/commit/rollback;
-- full external staging smoke before ring rotation;
+It contains:
+
+- exact manifest/private-source preflight;
+- immutable `git archive` source freeze;
+- separate test and build snapshots from the same archive;
+- GitHub-hosted application gates;
+- build-only GHCR bootstrap mode with no VPS deployment;
+- private-package visibility check;
+- release image revision/health check;
+- split credential jobs: VPS preflight / source build / VPS deploy / GHCR finalize;
+- restricted root-owned transactional VPS wrapper;
+- protected control-side full staging smoke;
 - bounded GHCR cleanup;
-- bounded VPS current/rollback/safety retention;
-- security and operational contracts.
+- bounded VPS current/rollback/safety ring;
+- no-op-safe repeat release path;
+- security/release/cleanup documentation.
 
-The publish workflow triggers only on a future `release/staging.json` change merged to protected `main`. Merging this maintenance PR alone does not build, push or deploy an application image.
+## Security review findings already addressed in PR #5
 
-The scheduled GHCR cleanup job is inert unless:
+Manual review caught and corrected these issues before merge:
 
-```text
-P1_STAGING_MAINTENANCE_ENABLED=true
-```
+1. Source-controlled host smoke must not run in a job holding the VPS private key. Full host smoke now lives only in protected public release-control workflow code.
+2. Application tests must not be able to mutate the later Docker build context. Tests and build now use different directories extracted from one frozen source archive.
+3. Private source and VPS private key must not coexist in the same job. The workflow is split into separate jobs.
+4. Releasing the already-current digest must not rotate duplicate rollback/safety entries. The VPS wrapper has an explicit no-op transaction.
+5. Root-owned staging image env is required and checked against the live container before state-changing actions.
+6. Temporary root state uses atomic files and EXIT/INT/TERM cleanup instead of function-local RETURN traps.
 
-The publish workflow refuses to start unless:
+## External setup is still absent
 
-```text
-P1_STAGING_PUBLISH_ENABLED=true
-```
+No external installation is authorized yet. The following still require a separate Codex task after PR #5 is reviewed and separately authorized for merge:
 
-No enabling variables or credentials are created by this PR.
-
-## External setup still absent
-
-The following do not exist yet and require a separate reviewed Codex task after this PR is accepted:
-
-- read-only deploy key for private `proizvodstvo1` source;
-- restricted VPS SSH key/account/forced command;
-- VPS root-owned wrapper/config installation;
-- private GHCR package permission verification;
+- `P1_SOURCE_DEPLOY_KEY` read-only deploy key;
+- restricted VPS SSH account/key/forced command;
+- root-owned VPS wrapper/config installation;
 - VPS pull-only GHCR credential;
-- release-control repository secrets/variables;
-- proof of staging portal log rotation and disk threshold;
-- dry-run/no-live deployment acceptance.
+- release-control secrets/variables;
+- GHCR package/bootstrap access verification;
+- staging portal log-rotation and disk baseline proof.
+
+Enabling variables remain absent:
+
+```text
+P1_STAGING_BUILD_ONLY_ENABLED
+P1_STAGING_PUBLISH_ENABLED
+P1_STAGING_MAINTENANCE_ENABLED
+```
+
+Therefore there is no route from this maintenance PR to live deployment.
+
+## Planned bootstrap sequence after PR #5 acceptance
+
+1. Repurpose private source Issue #15 into the exact external installation task; do not create another placeholder issue.
+2. Install credentials/wrapper with all enabling variables false.
+3. Run wrapper self-test and VPS `state` only; no live deploy.
+4. Temporarily enable only `P1_STAGING_BUILD_ONLY_ENABLED` and run build-only to create/verify the private GHCR package without VPS deployment.
+5. Configure and prove VPS pull-only access to that one package.
+6. Disable build-only again and review cleanup evidence.
+7. Obtain separate Vladimir authorization before merging source-side PR #6 into `ai-dev` if still required.
+8. Obtain separate Vladimir authorization before the first manifest sequence that performs the controlled functionally-no-op live migration.
 
 ## Cleanup invariant
 
 No release step may use broad Docker cleanup. GHCR and VPS cleanup are exact-package/exact-image only. Any unclassifiable state or failed safe deletion returns `CLEANUP_BLOCKED` and prevents the next deployment.
-
-## Next gates
-
-1. Review this maintenance PR under protected public `main` and prove both required checks.
-2. Obtain Vladimir authorization before merging the maintenance PR.
-3. After merge, repurpose private Issue #15 into the exact external installation/credential task; do not create additional placeholder issues.
-4. Install external boundary with publication variables left disabled.
-5. Perform a dry-run that proves source checkout, tests, package permissions and VPS `state` without image push/deployment where possible.
-6. Obtain separate Vladimir authorization to merge source-side PR #6 into `ai-dev` if still required.
-7. Perform the first controlled functionally-no-op GHCR migration only after all previous evidence is green.
