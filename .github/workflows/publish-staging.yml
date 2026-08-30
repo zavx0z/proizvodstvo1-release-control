@@ -1,0 +1,382 @@
+name: Publish React staging
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "release/staging.json"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: p1-react-staging-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish immutable React staging image
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BUN_IMAGE: oven/bun:1.4.0-debian@sha256:0e74e9bd11cf47eb67ac4d8698ed1b10d378fa4a5f4a5f1146556087649b607f
+      IMAGE_REPOSITORY: ghcr.io/zavx0z/proizvodstvo1-react-portal
+      VPS_HOST: ${{ vars.P1_VPS_DEPLOY_HOST }}
+      VPS_USER: ${{ vars.P1_VPS_DEPLOY_USER }}
+
+    steps:
+      - name: Require explicitly enabled external boundary
+        shell: bash
+        env:
+          PUBLISH_ENABLED: ${{ vars.P1_STAGING_PUBLISH_ENABLED }}
+          SOURCE_KEY: ${{ secrets.P1_SOURCE_DEPLOY_KEY }}
+          VPS_KEY: ${{ secrets.P1_VPS_DEPLOY_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.P1_VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ "$PUBLISH_ENABLED" == "true" ]] || {
+            echo "P1_STAGING_PUBLISH_ENABLED is not true" >&2
+            exit 1
+          }
+          [[ -n "$SOURCE_KEY" ]] || { echo "P1_SOURCE_DEPLOY_KEY is missing" >&2; exit 1; }
+          [[ -n "$VPS_KEY" ]] || { echo "P1_VPS_DEPLOY_KEY is missing" >&2; exit 1; }
+          [[ -n "$VPS_KNOWN_HOSTS" ]] || { echo "P1_VPS_KNOWN_HOSTS is missing" >&2; exit 1; }
+          [[ "$VPS_HOST" =~ ^[A-Za-z0-9._:-]+$ ]] || { echo "invalid P1_VPS_DEPLOY_HOST" >&2; exit 1; }
+          [[ "$VPS_USER" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid P1_VPS_DEPLOY_USER" >&2; exit 1; }
+
+      - name: Checkout exact protected release-control commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Read release manifest
+        id: manifest
+        run: python3 scripts/publish_preflight.py --manifest release/staging.json
+
+      - name: Checkout current private ai-dev through read-only deploy key
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: zavx0z/proizvodstvo1
+          ref: ai-dev
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+          ssh-key: ${{ secrets.P1_SOURCE_DEPLOY_KEY }}
+
+      - name: Prove checked out ai-dev equals manifest source SHA
+        id: source
+        run: >-
+          python3 scripts/publish_preflight.py
+          --manifest release/staging.json
+          --source-dir source
+
+      - name: Repeat application gates with pinned Bun
+        shell: bash
+        run: |
+          set -euo pipefail
+          uid="$(id -u)"
+          gid="$(id -g)"
+          docker run --rm \
+            --user "$uid:$gid" \
+            -e HOME=/tmp \
+            -e CI=1 \
+            -v "$GITHUB_WORKSPACE/source:/app" \
+            -w /app \
+            "$BUN_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+              test "$(bun --version)" = "1.4.0"
+              bun install --frozen-lockfile
+              bun run toolchain:verify
+              bun run typecheck
+              bun test pkg/institute
+              bun run portal:build
+              cd app/ai
+              bun install --no-save
+              bun run check
+            '
+
+      - name: Install ephemeral restricted VPS SSH material
+        id: ssh
+        shell: bash
+        env:
+          VPS_KEY: ${{ secrets.P1_VPS_DEPLOY_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.P1_VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/p1-vps-deploy-key"
+          known="$RUNNER_TEMP/p1-vps-known-hosts"
+          printf '%s\n' "$VPS_KEY" > "$key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$known"
+          chmod 0600 "$key" "$known"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "known_hosts=$known" >> "$GITHUB_OUTPUT"
+
+      - name: Query committed VPS release state
+        id: vps_before
+        shell: bash
+        env:
+          SSH_KEY: ${{ steps.ssh.outputs.key }}
+          KNOWN_HOSTS: ${{ steps.ssh.outputs.known_hosts }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/vps-state-before.txt"
+          ssh \
+            -i "$SSH_KEY" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o "UserKnownHostsFile=$KNOWN_HOSTS" \
+            -- "$VPS_USER@$VPS_HOST" state > "$out"
+          cat "$out"
+          python3 - "$out" "$RUNNER_TEMP/protected-before.txt" <<'PY'
+          import pathlib, re, sys
+          source = pathlib.Path(sys.argv[1])
+          protected = pathlib.Path(sys.argv[2])
+          allowed = {"STATUS", "LIVE_IMAGE", "CURRENT_IMAGE", "ROLLBACK_IMAGE", "SAFETY_IMAGE", "PENDING_IMAGE", "BLOCKED_IMAGE"}
+          values = {}
+          for line in source.read_text("utf-8").splitlines():
+              if not line:
+                  continue
+              key, sep, value = line.partition("=")
+              if not sep or key not in allowed or key in values:
+                  raise SystemExit(f"unexpected VPS state line: {line!r}")
+              values[key] = value
+          if values.get("STATUS") != "ok":
+              raise SystemExit("VPS state did not return STATUS=ok")
+          if values.get("PENDING_IMAGE"):
+              raise SystemExit("PENDING_RECOVERY_REQUIRED")
+          if values.get("BLOCKED_IMAGE"):
+              raise SystemExit("CLEANUP_BLOCKED: VPS has unresolved blocked image")
+          image_re = re.compile(r"^(?:ghcr\.io/zavx0z/proizvodstvo1-react-portal|10\.66\.0\.10:5000/platform/proizvodstvo1-react-portal)@sha256:[0-9a-f]{64}$")
+          digests = []
+          for key in ("CURRENT_IMAGE", "ROLLBACK_IMAGE", "SAFETY_IMAGE"):
+              value = values.get(key, "")
+              if not value:
+                  continue
+              if not image_re.fullmatch(value):
+                  raise SystemExit(f"unexpected image in {key}")
+              if value.startswith("ghcr.io/"):
+                  digests.append(value)
+          protected.write_text("\n".join(digests) + ("\n" if digests else ""), "utf-8")
+          print("P1_VPS_STATE_VALID")
+          PY
+
+      - name: Pre-build bounded GHCR cleanup
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          python3 scripts/ghcr_cleanup.py
+          --apply
+          --protected-file "$RUNNER_TEMP/protected-before.txt"
+          --keep-deployed 5
+          --grace-hours 48
+          --max-delete 50
+
+      - name: Login to private GHCR with job-scoped token
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and push exact immutable candidate
+        id: image
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          SEQUENCE: ${{ steps.source.outputs.sequence }}
+          CANDIDATE_TAG: ${{ steps.source.outputs.candidate_tag }}
+          SOURCE_TAG: ${{ steps.source.outputs.source_tag }}
+        run: |
+          set -euo pipefail
+          export BUILDX_NO_DEFAULT_ATTESTATIONS=1
+          metadata="$RUNNER_TEMP/build-metadata.json"
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --push \
+            --build-arg "SOURCE_SHA=$SOURCE_SHA" \
+            -f source/app/ai/Dockerfile.release \
+            -t "$IMAGE_REPOSITORY:$CANDIDATE_TAG" \
+            -t "$IMAGE_REPOSITORY:$SOURCE_TAG" \
+            --metadata-file "$metadata" \
+            source
+          digest="$(python3 - "$metadata" <<'PY'
+          import json, re, sys
+          value = json.load(open(sys.argv[1], encoding="utf-8")).get("containerimage.digest", "")
+          if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+              raise SystemExit("BuildKit did not return an immutable digest")
+          print(value)
+          PY
+          )"
+          image="$IMAGE_REPOSITORY@$digest"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "IMAGE=$image"
+
+      - name: Deploy pending image, full smoke, then commit or rollback
+        id: deploy
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          SSH_KEY: ${{ steps.ssh.outputs.key }}
+          KNOWN_HOSTS: ${{ steps.ssh.outputs.known_hosts }}
+        run: |
+          set -euo pipefail
+          ssh_base=(
+            ssh
+            -i "$SSH_KEY"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o "UserKnownHostsFile=$KNOWN_HOSTS"
+            -- "$VPS_USER@$VPS_HOST"
+          )
+
+          pending="$RUNNER_TEMP/vps-deploy-pending.txt"
+          "${ssh_base[@]}" "deploy $IMAGE" > "$pending"
+          cat "$pending"
+
+          rollback_image="$(sed -n 's/^ROLLBACK_IMAGE=//p' "$pending" | tail -n 1)"
+          pending_image="$(sed -n 's/^PENDING_IMAGE=//p' "$pending" | tail -n 1)"
+          status="$(sed -n 's/^STATUS=//p' "$pending" | tail -n 1)"
+          allowed='^(ghcr\.io/zavx0z/proizvodstvo1-react-portal|10\.66\.0\.10:5000/platform/proizvodstvo1-react-portal)@sha256:[0-9a-f]{64}$'
+          [[ "$status" == pending ]] || { echo "deploy did not return STATUS=pending" >&2; exit 1; }
+          [[ "$pending_image" == "$IMAGE" ]] || { echo "pending image mismatch" >&2; exit 1; }
+          [[ "$rollback_image" =~ $allowed ]] || { echo "invalid rollback image" >&2; exit 1; }
+          echo "rollback_image=$rollback_image" >> "$GITHUB_OUTPUT"
+
+          if ! bash source/app/ai/ops/staging-smoke.sh https://staging.proizvodstvo1.ru; then
+            echo "Full smoke failed; restoring committed current image" >&2
+            rollback_out="$RUNNER_TEMP/vps-rollback.txt"
+            "${ssh_base[@]}" "rollback $rollback_image" > "$rollback_out" || {
+              cat "$rollback_out" >&2 || true
+              echo "ROLLBACK_FAILED" >&2
+              exit 1
+            }
+            cat "$rollback_out"
+            bash source/app/ai/ops/staging-smoke.sh https://staging.proizvodstvo1.ru || {
+              echo "ROLLBACK_SMOKE_FAILED" >&2
+              exit 1
+            }
+            echo "ROLLBACK_OK" >&2
+            exit 1
+          fi
+
+          committed="$RUNNER_TEMP/vps-commit.txt"
+          set +e
+          "${ssh_base[@]}" "commit $IMAGE" > "$committed"
+          commit_rc=$?
+          set -e
+          if (( commit_rc != 0 )); then
+            cat "$committed" >&2 || true
+            echo "Commit failed; attempting rollback of pending image" >&2
+            "${ssh_base[@]}" "rollback $rollback_image" >/dev/null 2>&1 || true
+            exit 1
+          fi
+          cat "$committed"
+          commit_status="$(sed -n 's/^STATUS=//p' "$committed" | tail -n 1)"
+          cleanup_status="$(sed -n 's/^CLEANUP_STATUS=//p' "$committed" | tail -n 1)"
+          current_image="$(sed -n 's/^CURRENT_IMAGE=//p' "$committed" | tail -n 1)"
+          rollback_after="$(sed -n 's/^ROLLBACK_IMAGE=//p' "$committed" | tail -n 1)"
+          safety_after="$(sed -n 's/^SAFETY_IMAGE=//p' "$committed" | tail -n 1)"
+          [[ "$commit_status" == ok && "$current_image" == "$IMAGE" ]] || {
+            echo "commit evidence mismatch" >&2
+            exit 1
+          }
+          echo "cleanup_status=$cleanup_status" >> "$GITHUB_OUTPUT"
+          echo "current_image=$current_image" >> "$GITHUB_OUTPUT"
+          echo "rollback_image_after=$rollback_after" >> "$GITHUB_OUTPUT"
+          echo "safety_image_after=$safety_after" >> "$GITHUB_OUTPUT"
+
+      - name: Mark successful deployment on the same immutable manifest
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          DEPLOYED_TAG: ${{ steps.source.outputs.deployed_tag }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "$IMAGE_REPOSITORY:$DEPLOYED_TAG" \
+            "$IMAGE"
+
+      - name: Post-deploy bounded GHCR cleanup
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_IMAGE: ${{ steps.deploy.outputs.current_image }}
+          ROLLBACK_IMAGE: ${{ steps.deploy.outputs.rollback_image_after }}
+          SAFETY_IMAGE: ${{ steps.deploy.outputs.safety_image_after }}
+        run: |
+          set -euo pipefail
+          protected="$RUNNER_TEMP/protected-after.txt"
+          : > "$protected"
+          for image in "$CURRENT_IMAGE" "$ROLLBACK_IMAGE" "$SAFETY_IMAGE"; do
+            [[ -n "$image" ]] || continue
+            case "$image" in
+              ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:*) printf '%s\n' "$image" >> "$protected" ;;
+            esac
+          done
+          python3 scripts/ghcr_cleanup.py \
+            --apply \
+            --protected-file "$protected" \
+            --keep-deployed 5 \
+            --grace-hours 48 \
+            --max-delete 50
+
+      - name: Enforce VPS cleanup completion
+        env:
+          VPS_CLEANUP_STATUS: ${{ steps.deploy.outputs.cleanup_status }}
+        run: |
+          [[ "$VPS_CLEANUP_STATUS" == "OK" ]] || {
+            echo "VPS cleanup status is $VPS_CLEANUP_STATUS" >&2
+            echo "CLEANUP_BLOCKED" >&2
+            exit 1
+          }
+
+      - name: Release summary
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          SEQUENCE: ${{ steps.source.outputs.sequence }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          CURRENT_IMAGE: ${{ steps.deploy.outputs.current_image }}
+          ROLLBACK_IMAGE: ${{ steps.deploy.outputs.rollback_image_after }}
+          SAFETY_IMAGE: ${{ steps.deploy.outputs.safety_image_after }}
+        run: |
+          {
+            echo "## React staging release complete"
+            echo
+            echo "- Sequence: \`$SEQUENCE\`"
+            echo "- Source SHA: \`$SOURCE_SHA\`"
+            echo "- Image: \`$IMAGE\`"
+            echo "- Current: \`$CURRENT_IMAGE\`"
+            echo "- Rollback: \`$ROLLBACK_IMAGE\`"
+            echo "- Safety: \`$SAFETY_IMAGE\`"
+            echo "- GHCR cleanup: OK"
+            echo "- VPS cleanup: OK"
+            echo "- Scope: React staging portal only"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Always remove ephemeral credentials and local auth
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -f -- \
+            "$RUNNER_TEMP/p1-vps-deploy-key" \
+            "$RUNNER_TEMP/p1-vps-known-hosts" \
+            "$RUNNER_TEMP/vps-state-before.txt" \
+            "$RUNNER_TEMP/protected-before.txt" \
+            "$RUNNER_TEMP/protected-after.txt" \
+            "$RUNNER_TEMP/vps-deploy-pending.txt" \
+            "$RUNNER_TEMP/vps-rollback.txt" \
+            "$RUNNER_TEMP/vps-commit.txt" \
+            "$RUNNER_TEMP/build-metadata.json"
+          docker logout ghcr.io >/dev/null 2>&1 || true
