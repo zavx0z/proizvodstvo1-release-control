@@ -6,41 +6,52 @@ on:
       - main
     paths:
       - "release/staging.json"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Bootstrap GHCR without any VPS deployment"
+        required: true
+        type: choice
+        default: build-only
+        options:
+          - build-only
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: p1-react-staging-publish
   cancel-in-progress: false
 
+env:
+  BUN_IMAGE: oven/bun:1.4.0-debian@sha256:0e74e9bd11cf47eb67ac4d8698ed1b10d378fa4a5f4a5f1146556087649b607f
+  IMAGE_REPOSITORY: ghcr.io/zavx0z/proizvodstvo1-react-portal
+
 jobs:
-  publish:
-    name: Publish immutable React staging image
+  vps-preflight:
+    name: Read restricted VPS state
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      current_image: ${{ steps.state.outputs.current_image }}
+      rollback_image: ${{ steps.state.outputs.rollback_image }}
+      safety_image: ${{ steps.state.outputs.safety_image }}
     env:
-      BUN_IMAGE: oven/bun:1.4.0-debian@sha256:0e74e9bd11cf47eb67ac4d8698ed1b10d378fa4a5f4a5f1146556087649b607f
-      IMAGE_REPOSITORY: ghcr.io/zavx0z/proizvodstvo1-react-portal
       VPS_HOST: ${{ vars.P1_VPS_DEPLOY_HOST }}
       VPS_USER: ${{ vars.P1_VPS_DEPLOY_USER }}
-
     steps:
-      - name: Require explicitly enabled external boundary
+      - name: Require explicitly enabled publication boundary
         shell: bash
         env:
           PUBLISH_ENABLED: ${{ vars.P1_STAGING_PUBLISH_ENABLED }}
-          SOURCE_KEY: ${{ secrets.P1_SOURCE_DEPLOY_KEY }}
           VPS_KEY: ${{ secrets.P1_VPS_DEPLOY_KEY }}
           VPS_KNOWN_HOSTS: ${{ secrets.P1_VPS_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          [[ "$PUBLISH_ENABLED" == "true" ]] || {
-            echo "P1_STAGING_PUBLISH_ENABLED is not true" >&2
-            exit 1
-          }
-          [[ -n "$SOURCE_KEY" ]] || { echo "P1_SOURCE_DEPLOY_KEY is missing" >&2; exit 1; }
+          [[ "$PUBLISH_ENABLED" == "true" ]] || { echo "P1_STAGING_PUBLISH_ENABLED is not true" >&2; exit 1; }
           [[ -n "$VPS_KEY" ]] || { echo "P1_VPS_DEPLOY_KEY is missing" >&2; exit 1; }
           [[ -n "$VPS_KNOWN_HOSTS" ]] || { echo "P1_VPS_KNOWN_HOSTS is missing" >&2; exit 1; }
           [[ "$VPS_HOST" =~ ^[A-Za-z0-9._:-]+$ ]] || { echo "invalid P1_VPS_DEPLOY_HOST" >&2; exit 1; }
@@ -52,53 +63,6 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
-
-      - name: Read release manifest
-        id: manifest
-        run: python3 scripts/publish_preflight.py --manifest release/staging.json
-
-      - name: Checkout current private ai-dev through read-only deploy key
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          repository: zavx0z/proizvodstvo1
-          ref: ai-dev
-          path: source
-          fetch-depth: 1
-          persist-credentials: false
-          ssh-key: ${{ secrets.P1_SOURCE_DEPLOY_KEY }}
-
-      - name: Prove checked out ai-dev equals manifest source SHA
-        id: source
-        run: >-
-          python3 scripts/publish_preflight.py
-          --manifest release/staging.json
-          --source-dir source
-
-      - name: Repeat application gates with pinned Bun
-        shell: bash
-        run: |
-          set -euo pipefail
-          uid="$(id -u)"
-          gid="$(id -g)"
-          docker run --rm \
-            --user "$uid:$gid" \
-            -e HOME=/tmp \
-            -e CI=1 \
-            -v "$GITHUB_WORKSPACE/source:/app" \
-            -w /app \
-            "$BUN_IMAGE" \
-            bash -lc '
-              set -euo pipefail
-              test "$(bun --version)" = "1.4.0"
-              bun install --frozen-lockfile
-              bun run toolchain:verify
-              bun run typecheck
-              bun test pkg/institute
-              bun run portal:build
-              cd app/ai
-              bun install --no-save
-              bun run check
-            '
 
       - name: Install ephemeral restricted VPS SSH material
         id: ssh
@@ -117,15 +81,15 @@ jobs:
           echo "key=$key" >> "$GITHUB_OUTPUT"
           echo "known_hosts=$known" >> "$GITHUB_OUTPUT"
 
-      - name: Query committed VPS release state
-        id: vps_before
+      - name: Read and validate committed VPS ring
+        id: state
         shell: bash
         env:
           SSH_KEY: ${{ steps.ssh.outputs.key }}
           KNOWN_HOSTS: ${{ steps.ssh.outputs.known_hosts }}
         run: |
           set -euo pipefail
-          out="$RUNNER_TEMP/vps-state-before.txt"
+          out="$RUNNER_TEMP/vps-state.txt"
           ssh \
             -i "$SSH_KEY" \
             -o BatchMode=yes \
@@ -134,10 +98,10 @@ jobs:
             -o "UserKnownHostsFile=$KNOWN_HOSTS" \
             -- "$VPS_USER@$VPS_HOST" state > "$out"
           cat "$out"
-          python3 - "$out" "$RUNNER_TEMP/protected-before.txt" <<'PY'
+          python3 - "$out" "$GITHUB_OUTPUT" <<'PY'
           import pathlib, re, sys
           source = pathlib.Path(sys.argv[1])
-          protected = pathlib.Path(sys.argv[2])
+          output = pathlib.Path(sys.argv[2])
           allowed = {"STATUS", "LIVE_IMAGE", "CURRENT_IMAGE", "ROLLBACK_IMAGE", "SAFETY_IMAGE", "PENDING_IMAGE", "BLOCKED_IMAGE"}
           values = {}
           for line in source.read_text("utf-8").splitlines():
@@ -154,29 +118,177 @@ jobs:
           if values.get("BLOCKED_IMAGE"):
               raise SystemExit("CLEANUP_BLOCKED: VPS has unresolved blocked image")
           image_re = re.compile(r"^(?:ghcr\.io/zavx0z/proizvodstvo1-react-portal|10\.66\.0\.10:5000/platform/proizvodstvo1-react-portal)@sha256:[0-9a-f]{64}$")
-          digests = []
-          for key in ("CURRENT_IMAGE", "ROLLBACK_IMAGE", "SAFETY_IMAGE"):
+          for key in ("LIVE_IMAGE", "CURRENT_IMAGE", "ROLLBACK_IMAGE", "SAFETY_IMAGE"):
               value = values.get(key, "")
-              if not value:
-                  continue
-              if not image_re.fullmatch(value):
-                  raise SystemExit(f"unexpected image in {key}")
-              if value.startswith("ghcr.io/"):
-                  digests.append(value)
-          protected.write_text("\n".join(digests) + ("\n" if digests else ""), "utf-8")
-          print("P1_VPS_STATE_VALID")
+              if value and not image_re.fullmatch(value):
+                  raise SystemExit(f"unexpected image in {key}: {value!r}")
+          if values.get("LIVE_IMAGE") != values.get("CURRENT_IMAGE"):
+              raise SystemExit("live image differs from committed current image")
+          with output.open("a", encoding="utf-8") as handle:
+              handle.write(f"current_image={values.get('CURRENT_IMAGE', '')}\n")
+              handle.write(f"rollback_image={values.get('ROLLBACK_IMAGE', '')}\n")
+              handle.write(f"safety_image={values.get('SAFETY_IMAGE', '')}\n")
+          print("P1_VPS_PREFLIGHT_STATE_VALID")
           PY
 
-      - name: Pre-build bounded GHCR cleanup
+      - name: Always remove VPS SSH material
+        if: always()
+        shell: bash
+        run: |
+          rm -f -- \
+            "$RUNNER_TEMP/p1-vps-deploy-key" \
+            "$RUNNER_TEMP/p1-vps-known-hosts" \
+            "$RUNNER_TEMP/vps-state.txt"
+
+  build:
+    name: Verify source and publish immutable candidate
+    needs:
+      - vps-preflight
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' || needs.vps-preflight.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      sequence: ${{ steps.source.outputs.sequence }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      digest: ${{ steps.image.outputs.digest }}
+      image: ${{ steps.image.outputs.image }}
+      deployed_tag: ${{ steps.source.outputs.deployed_tag }}
+    env:
+      SMOKE_CONTAINER: p1-release-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Require exact build mode and private-source credential
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_MODE: ${{ inputs.mode }}
+          BUILD_ONLY_ENABLED: ${{ vars.P1_STAGING_BUILD_ONLY_ENABLED }}
+          PUBLISH_ENABLED: ${{ vars.P1_STAGING_PUBLISH_ENABLED }}
+          SOURCE_KEY: ${{ secrets.P1_SOURCE_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          [[ -n "$SOURCE_KEY" ]] || { echo "P1_SOURCE_DEPLOY_KEY is missing" >&2; exit 1; }
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            [[ "$DISPATCH_MODE" == build-only ]] || { echo "manual mode must be build-only" >&2; exit 1; }
+            [[ "$BUILD_ONLY_ENABLED" == true ]] || { echo "P1_STAGING_BUILD_ONLY_ENABLED is not true" >&2; exit 1; }
+          else
+            [[ "$EVENT_NAME" == push ]] || { echo "unexpected event" >&2; exit 1; }
+            [[ "$PUBLISH_ENABLED" == true ]] || { echo "P1_STAGING_PUBLISH_ENABLED is not true" >&2; exit 1; }
+          fi
+
+      - name: Checkout exact protected release-control commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Read release manifest
+        id: manifest
+        run: python3 scripts/publish_preflight.py --manifest release/staging.json
+
+      - name: Pre-release bounded GHCR cleanup
+        if: github.event_name == 'push'
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >-
-          python3 scripts/ghcr_cleanup.py
-          --apply
-          --protected-file "$RUNNER_TEMP/protected-before.txt"
-          --keep-deployed 5
-          --grace-hours 48
-          --max-delete 50
+          CURRENT_IMAGE: ${{ needs.vps-preflight.outputs.current_image }}
+          ROLLBACK_IMAGE: ${{ needs.vps-preflight.outputs.rollback_image }}
+          SAFETY_IMAGE: ${{ needs.vps-preflight.outputs.safety_image }}
+        run: |
+          set -euo pipefail
+          protected="$RUNNER_TEMP/protected-before.txt"
+          : > "$protected"
+          for image in "$CURRENT_IMAGE" "$ROLLBACK_IMAGE" "$SAFETY_IMAGE"; do
+            case "$image" in
+              ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:*) printf '%s\n' "$image" >> "$protected" ;;
+              "") ;;
+            esac
+          done
+          python3 scripts/ghcr_cleanup.py \
+            --apply \
+            --protected-file "$protected" \
+            --keep-deployed 5 \
+            --grace-hours 48 \
+            --max-delete 50
+
+      - name: Checkout current private ai-dev through read-only deploy key
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: zavx0z/proizvodstvo1
+          ref: ai-dev
+          path: source-checkout
+          fetch-depth: 1
+          persist-credentials: false
+          ssh-key: ${{ secrets.P1_SOURCE_DEPLOY_KEY }}
+
+      - name: Prove current ai-dev and freeze immutable source archive
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/publish_preflight.py \
+            --manifest release/staging.json \
+            --source-dir source-checkout
+
+          python3 - <<'PY'
+          import subprocess
+          for line in subprocess.check_output(["git", "-C", "source-checkout", "ls-tree", "-r", "HEAD"], text=True).splitlines():
+              meta, path = line.split("\t", 1)
+              mode, kind, _sha = meta.split()
+              if mode in {"120000", "160000"} or kind != "blob":
+                  raise SystemExit(f"source snapshot rejects symlink/submodule entry: {path} ({mode} {kind})")
+          print("P1_SOURCE_TREE_SNAPSHOT_SAFE")
+          PY
+
+          archive="$RUNNER_TEMP/p1-source.tar"
+          git -C source-checkout archive --format=tar --output="$archive" HEAD
+          chmod 0444 "$archive"
+          echo "SOURCE_ARCHIVE_SHA256=$(sha256sum "$archive" | awk '{print $1}')"
+
+          test_dir="$RUNNER_TEMP/p1-test-source"
+          mkdir -p "$test_dir"
+          tar -xf "$archive" -C "$test_dir"
+
+      - name: Repeat application gates only inside isolated test snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_dir="$RUNNER_TEMP/p1-test-source"
+          uid="$(id -u)"
+          gid="$(id -g)"
+          docker run --rm \
+            --user "$uid:$gid" \
+            -e HOME=/tmp \
+            -e CI=1 \
+            -v "$test_dir:/app" \
+            -w /app \
+            "$BUN_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+              test "$(bun --version)" = "1.4.0"
+              bun install --frozen-lockfile
+              bun run toolchain:verify
+              bun run typecheck
+              bun test pkg/institute
+              bun run portal:build
+              cd app/ai
+              bun install --no-save
+              bun run check
+            '
+
+      - name: Materialize untouched build snapshot after tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_dir="$RUNNER_TEMP/p1-build-source"
+          mkdir -p "$build_dir"
+          tar -xf "$RUNNER_TEMP/p1-source.tar" -C "$build_dir"
+          [[ ! -e "$build_dir/.git" ]] || { echo "git metadata leaked into build snapshot" >&2; exit 1; }
 
       - name: Login to private GHCR with job-scoped token
         shell: bash
@@ -189,24 +301,24 @@ jobs:
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
-          SEQUENCE: ${{ steps.source.outputs.sequence }}
           CANDIDATE_TAG: ${{ steps.source.outputs.candidate_tag }}
           SOURCE_TAG: ${{ steps.source.outputs.source_tag }}
         run: |
           set -euo pipefail
-          export BUILDX_NO_DEFAULT_ATTESTATIONS=1
+          build_dir="$RUNNER_TEMP/p1-build-source"
           metadata="$RUNNER_TEMP/build-metadata.json"
+          export BUILDX_NO_DEFAULT_ATTESTATIONS=1
           docker buildx build \
             --platform linux/amd64 \
             --provenance=false \
             --sbom=false \
             --push \
             --build-arg "SOURCE_SHA=$SOURCE_SHA" \
-            -f source/app/ai/Dockerfile.release \
+            -f "$build_dir/app/ai/Dockerfile.release" \
             -t "$IMAGE_REPOSITORY:$CANDIDATE_TAG" \
             -t "$IMAGE_REPOSITORY:$SOURCE_TAG" \
             --metadata-file "$metadata" \
-            source
+            "$build_dir"
           digest="$(python3 - "$metadata" <<'PY'
           import json, re, sys
           value = json.load(open(sys.argv[1], encoding="utf-8")).get("containerimage.digest", "")
@@ -218,13 +330,190 @@ jobs:
           image="$IMAGE_REPOSITORY@$digest"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "image=$image" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$image" > "$RUNNER_TEMP/built-image.txt"
           echo "IMAGE=$image"
 
-      - name: Deploy pending image, full smoke, then commit or rollback
-        id: deploy
+      - name: Prove GHCR package is private
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, time, urllib.error, urllib.request
+          url = "https://api.github.com/users/zavx0z/packages/container/proizvodstvo1-react-portal"
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+              "X-GitHub-Api-Version": "2022-11-28",
+              "User-Agent": "proizvodstvo1-package-visibility-check",
+          }
+          last = None
+          for _ in range(12):
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+                      value = json.load(response)
+                  if value.get("visibility") != "private":
+                      raise SystemExit(f"GHCR package is not private: {value.get('visibility')!r}")
+                  print("P1_GHCR_PACKAGE_PRIVATE")
+                  break
+              except urllib.error.HTTPError as error:
+                  last = error
+                  if error.code != 404:
+                      raise
+                  time.sleep(5)
+          else:
+              raise SystemExit(f"GHCR package metadata did not become visible: {last}")
+          PY
+
+      - name: Pull candidate and verify release image revision and health
         shell: bash
         env:
           IMAGE: ${{ steps.image.outputs.image }}
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE" >/dev/null
+          revision="$(docker inspect -f '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE")"
+          [[ "$revision" == "$SOURCE_SHA" ]] || { echo "OCI revision label mismatch" >&2; exit 1; }
+          docker run -d \
+            --name "$SMOKE_CONTAINER" \
+            --read-only \
+            --tmpfs /tmp:rw,nosuid,nodev,size=32m \
+            "$IMAGE" >/dev/null
+          for _ in $(seq 1 45); do
+            if docker exec "$SMOKE_CONTAINER" bun -e "const r=await fetch('http://127.0.0.1:18180/health'); const j=await r.json(); if(!r.ok||j.status!=='ok'||j.seoIndexable!==false) process.exit(1)" >/dev/null 2>&1; then
+              echo "P1_RELEASE_IMAGE_HEALTH_VALID"
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs "$SMOKE_CONTAINER" >&2 || true
+          echo "release image health timeout" >&2
+          exit 1
+
+      - name: Build-only summary
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+          SEQUENCE: ${{ steps.source.outputs.sequence }}
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          {
+            echo "## GHCR build-only bootstrap complete"
+            echo
+            echo "- Sequence: \`$SEQUENCE\`"
+            echo "- Source SHA: \`$SOURCE_SHA\`"
+            echo "- Candidate: \`$IMAGE\`"
+            echo "- Live staging: not touched"
+            echo "- Candidate remains protected by the 48h GHCR grace window"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Always clean ephemeral build state
+        if: always()
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          set +e
+          docker rm -f "$SMOKE_CONTAINER" >/dev/null 2>&1 || true
+          [[ -z "$IMAGE" ]] || docker image rm "$IMAGE" >/dev/null 2>&1 || true
+          docker logout ghcr.io >/dev/null 2>&1 || true
+          rm -rf -- \
+            "$RUNNER_TEMP/p1-test-source" \
+            "$RUNNER_TEMP/p1-build-source"
+          rm -f -- \
+            "$RUNNER_TEMP/p1-source.tar" \
+            "$RUNNER_TEMP/protected-before.txt" \
+            "$RUNNER_TEMP/build-metadata.json" \
+            "$RUNNER_TEMP/built-image.txt"
+
+  deploy:
+    name: Transactional React staging deployment
+    needs:
+      - vps-preflight
+      - build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      current_image: ${{ steps.transaction.outputs.current_image }}
+      rollback_image: ${{ steps.transaction.outputs.rollback_image }}
+      safety_image: ${{ steps.transaction.outputs.safety_image }}
+      cleanup_status: ${{ steps.transaction.outputs.cleanup_status }}
+    env:
+      VPS_HOST: ${{ vars.P1_VPS_DEPLOY_HOST }}
+      VPS_USER: ${{ vars.P1_VPS_DEPLOY_USER }}
+      IMAGE: ${{ needs.build.outputs.image }}
+      EXPECTED_CURRENT: ${{ needs.vps-preflight.outputs.current_image }}
+      EXPECTED_ROLLBACK: ${{ needs.vps-preflight.outputs.rollback_image }}
+      EXPECTED_SAFETY: ${{ needs.vps-preflight.outputs.safety_image }}
+    steps:
+      - name: Checkout exact protected release-control code only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install ephemeral restricted VPS SSH material
+        id: ssh
+        shell: bash
+        env:
+          VPS_KEY: ${{ secrets.P1_VPS_DEPLOY_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.P1_VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          [[ -n "$VPS_KEY" && -n "$VPS_KNOWN_HOSTS" ]] || { echo "VPS SSH material missing" >&2; exit 1; }
+          umask 077
+          key="$RUNNER_TEMP/p1-vps-deploy-key"
+          known="$RUNNER_TEMP/p1-vps-known-hosts"
+          printf '%s\n' "$VPS_KEY" > "$key"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$known"
+          chmod 0600 "$key" "$known"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "known_hosts=$known" >> "$GITHUB_OUTPUT"
+
+      - name: Re-check VPS state has not drifted since preflight
+        shell: bash
+        env:
+          SSH_KEY: ${{ steps.ssh.outputs.key }}
+          KNOWN_HOSTS: ${{ steps.ssh.outputs.known_hosts }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/vps-state-recheck.txt"
+          ssh -i "$SSH_KEY" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN_HOSTS" -- "$VPS_USER@$VPS_HOST" state > "$out"
+          python3 - "$out" <<'PY'
+          import os, pathlib, sys
+          values = {}
+          for line in pathlib.Path(sys.argv[1]).read_text("utf-8").splitlines():
+              if line:
+                  key, sep, value = line.partition("=")
+                  if not sep or key in values:
+                      raise SystemExit("malformed VPS state")
+                  values[key] = value
+          expected = {
+              "CURRENT_IMAGE": os.environ["EXPECTED_CURRENT"],
+              "ROLLBACK_IMAGE": os.environ["EXPECTED_ROLLBACK"],
+              "SAFETY_IMAGE": os.environ["EXPECTED_SAFETY"],
+          }
+          if values.get("STATUS") != "ok" or values.get("PENDING_IMAGE") or values.get("BLOCKED_IMAGE"):
+              raise SystemExit("VPS state is no longer releasable")
+          for key, wanted in expected.items():
+              if values.get(key, "") != wanted:
+                  raise SystemExit(f"VPS ring drifted at {key}")
+          if values.get("LIVE_IMAGE") != values.get("CURRENT_IMAGE"):
+              raise SystemExit("VPS live image drifted from current")
+          print("P1_VPS_STATE_RECHECK_VALID")
+          PY
+
+      - name: Deploy pending image, run trusted full smoke, commit or roll back
+        id: transaction
+        shell: bash
+        env:
           SSH_KEY: ${{ steps.ssh.outputs.key }}
           KNOWN_HOSTS: ${{ steps.ssh.outputs.known_hosts }}
         run: |
@@ -239,88 +528,157 @@ jobs:
             -- "$VPS_USER@$VPS_HOST"
           )
 
-          pending="$RUNNER_TEMP/vps-deploy-pending.txt"
+          trusted_smoke() {
+            local base_url="https://staging.proizvodstvo1.ru"
+            local tmp
+            tmp="$(mktemp -d "$RUNNER_TEMP/p1-trusted-smoke.XXXXXX")"
+            local path safe status health_status robots_status sitemap_status
+
+            fetch() {
+              curl --silent --show-error --connect-timeout 10 --max-time 45 \
+                --output "$2" --dump-header "$3" --write-out '%{http_code}' \
+                "$base_url$1"
+            }
+            expect_status() {
+              [[ "$2" == "$1" ]] || { echo "$3 expected HTTP $1, got $2" >&2; rm -rf -- "$tmp"; return 1; }
+            }
+
+            health_status="$(fetch /health "$tmp/health.body" "$tmp/health.headers")"
+            expect_status 200 "$health_status" /health || return 1
+            grep -Fq '"status":"ok"' "$tmp/health.body" || { rm -rf -- "$tmp"; return 1; }
+            grep -Fq '"seoIndexable":false' "$tmp/health.body" || { rm -rf -- "$tmp"; return 1; }
+
+            for path in / /request /institute; do
+              safe="${path//\//_}"
+              status="$(fetch "$path" "$tmp/$safe.body" "$tmp/$safe.headers")"
+              expect_status 200 "$status" "$path" || return 1
+              grep -Fiq 'X-Robots-Tag: noindex, nofollow' "$tmp/$safe.headers" || { rm -rf -- "$tmp"; return 1; }
+              ! grep -Fq 'Страница не найдена' "$tmp/$safe.body" || { rm -rf -- "$tmp"; return 1; }
+            done
+
+            robots_status="$(fetch /robots.txt "$tmp/robots.body" "$tmp/robots.headers")"
+            expect_status 200 "$robots_status" /robots.txt || return 1
+            grep -Fq 'User-agent: *' "$tmp/robots.body" || { rm -rf -- "$tmp"; return 1; }
+            grep -Fq 'Allow: /' "$tmp/robots.body" || { rm -rf -- "$tmp"; return 1; }
+            grep -Fiq 'X-Robots-Tag: noindex, nofollow' "$tmp/robots.headers" || { rm -rf -- "$tmp"; return 1; }
+            ! grep -Fq 'Disallow: /' "$tmp/robots.body" || { rm -rf -- "$tmp"; return 1; }
+
+            sitemap_status="$(fetch /sitemap.xml "$tmp/sitemap.body" "$tmp/sitemap.headers")"
+            expect_status 404 "$sitemap_status" /sitemap.xml || return 1
+            rm -rf -- "$tmp"
+            echo "P1_TRUSTED_STAGING_SMOKE_VALID"
+          }
+
+          pending="$RUNNER_TEMP/vps-pending.txt"
           "${ssh_base[@]}" "deploy $IMAGE" > "$pending"
           cat "$pending"
-
+          status="$(sed -n 's/^STATUS=//p' "$pending" | tail -n 1)"
           rollback_image="$(sed -n 's/^ROLLBACK_IMAGE=//p' "$pending" | tail -n 1)"
           pending_image="$(sed -n 's/^PENDING_IMAGE=//p' "$pending" | tail -n 1)"
-          status="$(sed -n 's/^STATUS=//p' "$pending" | tail -n 1)"
           allowed='^(ghcr\.io/zavx0z/proizvodstvo1-react-portal|10\.66\.0\.10:5000/platform/proizvodstvo1-react-portal)@sha256:[0-9a-f]{64}$'
-          [[ "$status" == pending ]] || { echo "deploy did not return STATUS=pending" >&2; exit 1; }
-          [[ "$pending_image" == "$IMAGE" ]] || { echo "pending image mismatch" >&2; exit 1; }
+          [[ "$status" == pending && "$pending_image" == "$IMAGE" ]] || { echo "pending deployment evidence mismatch" >&2; exit 1; }
           [[ "$rollback_image" =~ $allowed ]] || { echo "invalid rollback image" >&2; exit 1; }
-          echo "rollback_image=$rollback_image" >> "$GITHUB_OUTPUT"
 
-          if ! bash source/app/ai/ops/staging-smoke.sh https://staging.proizvodstvo1.ru; then
-            echo "Full smoke failed; restoring committed current image" >&2
+          if ! trusted_smoke; then
+            echo "trusted full smoke failed; rolling back" >&2
             rollback_out="$RUNNER_TEMP/vps-rollback.txt"
-            "${ssh_base[@]}" "rollback $rollback_image" > "$rollback_out" || {
-              cat "$rollback_out" >&2 || true
-              echo "ROLLBACK_FAILED" >&2
-              exit 1
-            }
+            "${ssh_base[@]}" "rollback $rollback_image" > "$rollback_out" || { cat "$rollback_out" >&2 || true; echo "ROLLBACK_FAILED" >&2; exit 1; }
             cat "$rollback_out"
-            bash source/app/ai/ops/staging-smoke.sh https://staging.proizvodstvo1.ru || {
-              echo "ROLLBACK_SMOKE_FAILED" >&2
-              exit 1
-            }
+            trusted_smoke || { echo "ROLLBACK_SMOKE_FAILED" >&2; exit 1; }
             echo "ROLLBACK_OK" >&2
             exit 1
           fi
 
           committed="$RUNNER_TEMP/vps-commit.txt"
-          set +e
           "${ssh_base[@]}" "commit $IMAGE" > "$committed"
-          commit_rc=$?
-          set -e
-          if (( commit_rc != 0 )); then
-            cat "$committed" >&2 || true
-            echo "Commit failed; attempting rollback of pending image" >&2
-            "${ssh_base[@]}" "rollback $rollback_image" >/dev/null 2>&1 || true
-            exit 1
-          fi
           cat "$committed"
           commit_status="$(sed -n 's/^STATUS=//p' "$committed" | tail -n 1)"
           cleanup_status="$(sed -n 's/^CLEANUP_STATUS=//p' "$committed" | tail -n 1)"
           current_image="$(sed -n 's/^CURRENT_IMAGE=//p' "$committed" | tail -n 1)"
           rollback_after="$(sed -n 's/^ROLLBACK_IMAGE=//p' "$committed" | tail -n 1)"
           safety_after="$(sed -n 's/^SAFETY_IMAGE=//p' "$committed" | tail -n 1)"
-          [[ "$commit_status" == ok && "$current_image" == "$IMAGE" ]] || {
-            echo "commit evidence mismatch" >&2
-            exit 1
-          }
-          echo "cleanup_status=$cleanup_status" >> "$GITHUB_OUTPUT"
+          blocked_after="$(sed -n 's/^BLOCKED_IMAGE=//p' "$committed" | tail -n 1)"
+          [[ "$commit_status" == ok && "$current_image" == "$IMAGE" ]] || { echo "commit evidence mismatch" >&2; exit 1; }
+
           echo "current_image=$current_image" >> "$GITHUB_OUTPUT"
-          echo "rollback_image_after=$rollback_after" >> "$GITHUB_OUTPUT"
-          echo "safety_image_after=$safety_after" >> "$GITHUB_OUTPUT"
+          echo "rollback_image=$rollback_after" >> "$GITHUB_OUTPUT"
+          echo "safety_image=$safety_after" >> "$GITHUB_OUTPUT"
+          echo "cleanup_status=$cleanup_status" >> "$GITHUB_OUTPUT"
 
-      - name: Mark successful deployment on the same immutable manifest
+          [[ "$cleanup_status" == OK && -z "$blocked_after" ]] || { echo "CLEANUP_BLOCKED" >&2; exit 1; }
+
+      - name: Always remove VPS SSH and smoke material
+        if: always()
         shell: bash
-        env:
-          IMAGE: ${{ steps.image.outputs.image }}
-          DEPLOYED_TAG: ${{ steps.source.outputs.deployed_tag }}
         run: |
-          set -euo pipefail
-          docker buildx imagetools create \
-            --tag "$IMAGE_REPOSITORY:$DEPLOYED_TAG" \
-            "$IMAGE"
+          rm -f -- \
+            "$RUNNER_TEMP/p1-vps-deploy-key" \
+            "$RUNNER_TEMP/p1-vps-known-hosts" \
+            "$RUNNER_TEMP/vps-state-recheck.txt" \
+            "$RUNNER_TEMP/vps-pending.txt" \
+            "$RUNNER_TEMP/vps-rollback.txt" \
+            "$RUNNER_TEMP/vps-commit.txt"
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'p1-trusted-smoke.*' -exec rm -rf -- {} + 2>/dev/null || true
 
-      - name: Post-deploy bounded GHCR cleanup
+  finalize:
+    name: Mark success and enforce bounded GHCR retention
+    needs:
+      - build
+      - deploy
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ${{ needs.build.outputs.image }}
+      DIGEST: ${{ needs.build.outputs.digest }}
+      DEPLOYED_TAG: ${{ needs.build.outputs.deployed_tag }}
+      CURRENT_IMAGE: ${{ needs.deploy.outputs.current_image }}
+      ROLLBACK_IMAGE: ${{ needs.deploy.outputs.rollback_image }}
+      SAFETY_IMAGE: ${{ needs.deploy.outputs.safety_image }}
+    steps:
+      - name: Checkout exact protected release-control code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Login to GHCR with job-scoped token
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          CURRENT_IMAGE: ${{ steps.deploy.outputs.current_image }}
-          ROLLBACK_IMAGE: ${{ steps.deploy.outputs.rollback_image_after }}
-          SAFETY_IMAGE: ${{ steps.deploy.outputs.safety_image_after }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Add successful deployment tag without changing digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --prefer-index=false \
+            --tag "$IMAGE_REPOSITORY:$DEPLOYED_TAG" \
+            "$IMAGE"
+          tagged_digest="$(docker buildx imagetools inspect "$IMAGE_REPOSITORY:$DEPLOYED_TAG" | awk '$1 == "Digest:" {print $2; exit}')"
+          [[ "$tagged_digest" == "$DIGEST" ]] || {
+            echo "deployed tag digest mismatch: expected $DIGEST got $tagged_digest" >&2
+            exit 1
+          }
+          echo "P1_DEPLOYED_TAG_DIGEST_VALID=$tagged_digest"
+
+      - name: Post-deploy exact-package GHCR cleanup
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           protected="$RUNNER_TEMP/protected-after.txt"
           : > "$protected"
           for image in "$CURRENT_IMAGE" "$ROLLBACK_IMAGE" "$SAFETY_IMAGE"; do
-            [[ -n "$image" ]] || continue
             case "$image" in
               ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:*) printf '%s\n' "$image" >> "$protected" ;;
+              "") ;;
             esac
           done
           python3 scripts/ghcr_cleanup.py \
@@ -330,25 +688,11 @@ jobs:
             --grace-hours 48 \
             --max-delete 50
 
-      - name: Enforce VPS cleanup completion
-        env:
-          VPS_CLEANUP_STATUS: ${{ steps.deploy.outputs.cleanup_status }}
-        run: |
-          [[ "$VPS_CLEANUP_STATUS" == "OK" ]] || {
-            echo "VPS cleanup status is $VPS_CLEANUP_STATUS" >&2
-            echo "CLEANUP_BLOCKED" >&2
-            exit 1
-          }
-
       - name: Release summary
         shell: bash
         env:
-          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
-          SEQUENCE: ${{ steps.source.outputs.sequence }}
-          IMAGE: ${{ steps.image.outputs.image }}
-          CURRENT_IMAGE: ${{ steps.deploy.outputs.current_image }}
-          ROLLBACK_IMAGE: ${{ steps.deploy.outputs.rollback_image_after }}
-          SAFETY_IMAGE: ${{ steps.deploy.outputs.safety_image_after }}
+          SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+          SEQUENCE: ${{ needs.build.outputs.sequence }}
         run: |
           {
             echo "## React staging release complete"
@@ -364,19 +708,9 @@ jobs:
             echo "- Scope: React staging portal only"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Always remove ephemeral credentials and local auth
+      - name: Always remove GHCR auth and temp evidence
         if: always()
         shell: bash
         run: |
-          set +e
-          rm -f -- \
-            "$RUNNER_TEMP/p1-vps-deploy-key" \
-            "$RUNNER_TEMP/p1-vps-known-hosts" \
-            "$RUNNER_TEMP/vps-state-before.txt" \
-            "$RUNNER_TEMP/protected-before.txt" \
-            "$RUNNER_TEMP/protected-after.txt" \
-            "$RUNNER_TEMP/vps-deploy-pending.txt" \
-            "$RUNNER_TEMP/vps-rollback.txt" \
-            "$RUNNER_TEMP/vps-commit.txt" \
-            "$RUNNER_TEMP/build-metadata.json"
           docker logout ghcr.io >/dev/null 2>&1 || true
+          rm -f -- "$RUNNER_TEMP/protected-after.txt"
