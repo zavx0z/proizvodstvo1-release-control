@@ -100,14 +100,14 @@ jobs:
 
           checkout = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
           forbidden = (
-              "actions/cache@",
-              "actions/upload-artifact@",
-              "actions/download-artifact@",
-              "self-hosted",
-              "docker system prune",
-              "docker image prune -a",
-              "docker volume prune",
-              "docker compose down",
+              "actions/" + "cache@",
+              "actions/" + "upload-artifact@",
+              "actions/" + "download-artifact@",
+              "self" + "-hosted",
+              "docker system" + " prune",
+              "docker image" + " prune -a",
+              "docker volume" + " prune",
+              "docker compose" + " down",
           )
 
           for path in sorted(pathlib.Path(".github/workflows").glob("*.y*ml")):
