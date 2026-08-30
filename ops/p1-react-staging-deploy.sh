@@ -315,11 +315,14 @@ load_state
 current_live="$(live_image)"
 valid_known_image "$current_live" || fail "live portal image is outside allowed repositories: $current_live"
 configured_image="$(image_env_value)"
-[[ "$configured_image" == "$current_live" ]] || fail "STAGING_IMAGE_ENV does not match live portal image"
 
 if [[ -z "$CURRENT_IMAGE" ]]; then
+  [[ -z "$PENDING_IMAGE" ]] || fail "pending state exists without committed current"
+  [[ "$configured_image" == "$current_live" ]] || fail "initial STAGING_IMAGE_ENV does not match live portal image"
   CURRENT_IMAGE="$current_live"
   save_state
+elif [[ "$configured_image" != "$current_live" ]]; then
+  [[ -n "$PENDING_IMAGE" && "$configured_image" == "$PENDING_IMAGE" && "$current_live" == "$CURRENT_IMAGE" ]] || fail "STAGING_IMAGE_ENV/live mismatch is not an allowed pending crash window"
 fi
 
 requested="${SSH_ORIGINAL_COMMAND:-}"
@@ -353,7 +356,7 @@ case "$action" in
       fi
     fi
 
-    [[ "$current_live" == "$CURRENT_IMAGE" ]] || fail "live image does not match committed current state"
+    [[ "$current_live" == "$CURRENT_IMAGE" && "$configured_image" == "$CURRENT_IMAGE" ]] || fail "live/image-env state does not match committed current before deploy"
 
     if [[ "$image" == "$CURRENT_IMAGE" ]]; then
       check_health "$(portal_id)" || fail "current no-op image is not healthy"
@@ -400,7 +403,7 @@ case "$action" in
     [[ -n "${image:-}" ]] || fail "commit requires image"
     valid_target "$image" || fail "commit accepts only target GHCR image"
     [[ "$PENDING_IMAGE" == "$image" ]] || fail "commit image does not match pending image"
-    [[ "$current_live" == "$PENDING_IMAGE" ]] || fail "live image does not match pending image"
+    [[ "$current_live" == "$PENDING_IMAGE" && "$configured_image" == "$PENDING_IMAGE" ]] || fail "live/image-env does not match pending image"
 
     if [[ "$PENDING_IMAGE" == "$CURRENT_IMAGE" ]]; then
       PENDING_IMAGE=""
@@ -459,6 +462,7 @@ case "$action" in
 
     if [[ "$PENDING_IMAGE" == "$CURRENT_IMAGE" ]]; then
       [[ "$live_now" == "$CURRENT_IMAGE" ]] || fail "no-op pending state has unexpected live image"
+      [[ "$configured_image" == "$CURRENT_IMAGE" ]] || write_image_env "$CURRENT_IMAGE"
       PENDING_IMAGE=""
       save_state
       append_ledger rollback-noop rollback "$failed_image"
@@ -472,6 +476,7 @@ case "$action" in
     fi
 
     if [[ "$live_now" == "$CURRENT_IMAGE" ]]; then
+      [[ "$configured_image" == "$CURRENT_IMAGE" ]] || write_image_env "$CURRENT_IMAGE"
       PENDING_IMAGE=""
       if remove_exact_image "$failed_image"; then
         BLOCKED_IMAGE=""
@@ -491,7 +496,7 @@ case "$action" in
       exit 0
     fi
 
-    [[ "$live_now" == "$PENDING_IMAGE" ]] || fail "live image matches neither committed current nor pending image"
+    [[ "$live_now" == "$PENDING_IMAGE" && "$configured_image" == "$PENDING_IMAGE" ]] || fail "live/image-env matches neither committed current nor pending image"
     apply_live_image "$CURRENT_IMAGE" "$PENDING_IMAGE" || fail "rollback failed"
     PENDING_IMAGE=""
     if remove_exact_image "$failed_image"; then
