@@ -12,7 +12,7 @@ jobs:
   control-self-test:
     name: Release-control code self-test
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -58,5 +58,67 @@ jobs:
           print("P1_RELEASE_CONTROL_TEXT_TREE_VALID")
           PY
 
-      - name: Exercise trusted-base guard self-test
-        run: python3 scripts/release_guard.py --self-test
+      - name: Exercise Python release-control self-tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/release_guard.py --self-test
+          python3 scripts/publish_preflight.py --self-test
+          python3 scripts/ghcr_cleanup.py --self-test
+          python3 -m py_compile \
+            scripts/release_guard.py \
+            scripts/publish_preflight.py \
+            scripts/ghcr_cleanup.py
+
+      - name: Exercise restricted VPS wrapper parser
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n ops/p1-react-staging-deploy.sh
+          bash ops/p1-react-staging-deploy.sh --self-test
+
+      - name: Parse every workflow as YAML
+        shell: bash
+        run: |
+          set -euo pipefail
+          ruby -e '
+            require "yaml"
+            Dir[".github/workflows/*.{yml,yaml}"].sort.each do |path|
+              value = YAML.safe_load(File.read(path), permitted_classes: [], aliases: false)
+              raise "workflow is not a mapping: #{path}" unless value.is_a?(Hash)
+              puts "YAML_OK #{path}"
+            end
+          '
+
+      - name: Enforce workflow residue and runner policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          import re
+
+          checkout = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
+          forbidden = (
+              "actions/cache@",
+              "actions/upload-artifact@",
+              "actions/download-artifact@",
+              "self-hosted",
+              "docker system prune",
+              "docker image prune -a",
+              "docker volume prune",
+              "docker compose down",
+          )
+
+          for path in sorted(pathlib.Path(".github/workflows").glob("*.y*ml")):
+              text = path.read_text("utf-8")
+              for token in forbidden:
+                  if token in text:
+                      raise SystemExit(f"forbidden workflow token {token!r} in {path}")
+              for match in re.finditer(r"^\s*uses:\s*([^\s#]+)", text, re.MULTILINE):
+                  value = match.group(1)
+                  if value != checkout:
+                      raise SystemExit(f"unapproved or unpinned Action {value!r} in {path}")
+
+          print("P1_RELEASE_CONTROL_WORKFLOW_POLICY_VALID")
+          PY
