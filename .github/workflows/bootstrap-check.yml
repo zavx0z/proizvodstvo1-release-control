@@ -1,4 +1,4 @@
-name: Bootstrap release-control check
+name: Release-control code check
 
 on:
   pull_request:
@@ -9,9 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  bootstrap-contract:
-    name: Bootstrap repository contract
-    if: github.event.pull_request.base.sha == '5e438561a453648c1f9fd1e142a5c1cf01145a3b'
+  control-self-test:
+    name: Release-control code self-test
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -19,100 +18,45 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
-      - name: Validate bootstrap tree and baseline manifest
+      - name: Reject unexpected binary or symlink control files
         shell: bash
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
-          import datetime as dt
-          import json
-          import os
           import pathlib
-          import re
           import subprocess
 
-          expected = {
+          allowed_prefixes = (
               "README.md",
               "AGENTS.md",
-              "docs/RELEASE_CONTRACT.md",
-              "docs/RETENTION_AND_CLEANUP.md",
-              "release/staging.json",
-              "scripts/release_guard.py",
-              ".github/CODEOWNERS",
-              ".github/workflows/bootstrap-check.yml",
-              ".github/workflows/release-manifest-guard.yml",
-          }
+              ".github/",
+              "docs/",
+              "release/",
+              "scripts/",
+              "ops/",
+          )
 
-          tracked = set(subprocess.check_output(
-              ["git", "ls-tree", "-r", "--name-only", os.environ["HEAD_SHA"]],
-              text=True,
-          ).splitlines())
-          if tracked != expected:
-              raise SystemExit(f"bootstrap tree mismatch: expected={sorted(expected)} actual={sorted(tracked)}")
-
-          changed = set(subprocess.check_output(
-              ["git", "diff", "--name-only", os.environ["BASE_SHA"], os.environ["HEAD_SHA"]],
-              text=True,
-          ).splitlines())
-          if changed != expected:
-              raise SystemExit(f"bootstrap diff mismatch: expected={sorted(expected)} actual={sorted(changed)}")
-
-          tree = subprocess.check_output(
-              ["git", "ls-tree", "-r", os.environ["HEAD_SHA"]], text=True
-          ).splitlines()
-          for line in tree:
-              meta, _path = line.split("\t", 1)
+          for line in subprocess.check_output(
+              ["git", "ls-tree", "-r", "HEAD"], text=True
+          ).splitlines():
+              meta, path = line.split("\t", 1)
               mode, kind, _sha = meta.split()
               if mode != "100644" or kind != "blob":
-                  raise SystemExit(f"non-regular bootstrap entry rejected: {line}")
-
-          for rel in expected:
-              data = pathlib.Path(rel).read_bytes()
+                  raise SystemExit(f"non-regular control entry rejected: {line}")
+              if not path.startswith(allowed_prefixes):
+                  raise SystemExit(f"unexpected control path: {path}")
+              data = pathlib.Path(path).read_bytes()
               if len(data) > 131072:
-                  raise SystemExit(f"bootstrap text file too large: {rel}")
+                  raise SystemExit(f"control file too large: {path}")
               if b"\x00" in data:
-                  raise SystemExit(f"binary content rejected: {rel}")
+                  raise SystemExit(f"binary control file rejected: {path}")
               data.decode("utf-8")
 
-          manifest = json.loads(pathlib.Path("release/staging.json").read_text("utf-8"))
-          keys = {
-              "schema", "environment", "source_repository", "source_ref",
-              "source_sha", "sequence", "requested_at", "summary",
-          }
-          if set(manifest) != keys:
-              raise SystemExit("manifest keys do not match schema")
-          if manifest["schema"] != 1 or type(manifest["schema"]) is not int:
-              raise SystemExit("schema must be integer 1")
-          if manifest["environment"] != "staging":
-              raise SystemExit("environment must be staging")
-          if manifest["source_repository"] != "zavx0z/proizvodstvo1":
-              raise SystemExit("unexpected source_repository")
-          if manifest["source_ref"] != "refs/heads/ai-dev":
-              raise SystemExit("unexpected source_ref")
-          if not re.fullmatch(r"[0-9a-f]{40}", manifest["source_sha"]):
-              raise SystemExit("source_sha must be 40 lowercase hex")
-          if manifest["source_sha"] != "657b77d5839385775b0c1a43d2621a0ce9c3a628":
-              raise SystemExit("bootstrap source_sha must match frozen live staging baseline")
-          if type(manifest["sequence"]) is not int or manifest["sequence"] != 1:
-              raise SystemExit("bootstrap sequence must be integer 1")
-          stamp = manifest["requested_at"]
-          if not isinstance(stamp, str) or not stamp.endswith("Z"):
-              raise SystemExit("requested_at must be UTC RFC3339 ending in Z")
-          dt.datetime.fromisoformat(stamp[:-1] + "+00:00")
-          summary = manifest["summary"]
-          if not isinstance(summary, str) or not (1 <= len(summary) <= 160):
-              raise SystemExit("summary length must be 1..160")
-          if "\n" in summary or "\r" in summary or not summary.isprintable():
-              raise SystemExit("summary must be one printable line")
-
-          print("P1_RELEASE_CONTROL_BOOTSTRAP_VALID")
+          print("P1_RELEASE_CONTROL_TEXT_TREE_VALID")
           PY
 
-      - name: Exercise future trusted-base guard
+      - name: Exercise trusted-base guard self-test
         run: python3 scripts/release_guard.py --self-test
