@@ -17,6 +17,7 @@ jobs:
   cleanup:
     name: Bounded GHCR cleanup
     if: vars.P1_STAGING_MAINTENANCE_ENABLED == 'true'
+    environment: p1-vps-deploy
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:

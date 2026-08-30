@@ -124,7 +124,7 @@ Therefore there is no route from this maintenance PR to live deployment.
 
 ## Planned bootstrap sequence after PR #5 acceptance
 
-1. Repurpose private source Issue #15 into the exact external installation task; do not create another placeholder issue.
+1. After PR #5 is accepted, create a new exact external installation Issue; do not reuse Issue #15.
 2. Install credentials/wrapper with all enabling variables false.
 3. Run wrapper self-test and VPS `state` only; no live deploy.
 4. Temporarily enable only `P1_STAGING_BUILD_ONLY_ENABLED` and run build-only to create/verify the private GHCR package without VPS deployment.

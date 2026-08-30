@@ -36,15 +36,26 @@ No application source content is copied into this repository.
 
 ## GitHub Actions secrets and variables
 
-Expected secrets:
+Secrets are environment-scoped, never repository-scoped. Both environments must
+be restricted to protected branches only before any enabling variable is set.
+
+Exact map:
 
 ```text
-P1_SOURCE_DEPLOY_KEY
-P1_VPS_DEPLOY_KEY
-P1_VPS_KNOWN_HOSTS
+p1-source-build
+  P1_SOURCE_DEPLOY_KEY
+  deployment branches: protected branches only
+
+p1-vps-deploy
+  P1_VPS_DEPLOY_KEY
+  P1_VPS_KNOWN_HOSTS
+  deployment branches: protected branches only
 ```
 
-Expected non-secret variables:
+No other job environment may receive these secrets. The environments and their
+secrets are external installation state and are not created by this code patch.
+
+Expected non-secret repository variables:
 
 ```text
 P1_STAGING_BUILD_ONLY_ENABLED
@@ -102,15 +113,20 @@ The publisher deliberately separates credentials across jobs.
 
 ### `vps-preflight`
 
-Has access to the restricted VPS key only. It has no private-source deploy key and no application source checkout.
+Uses environment `p1-vps-deploy` and has access to the restricted VPS key only.
+It has no private-source deploy key and no application source checkout.
 
 ### `build`
 
-Has the private-source deploy key and job-scoped GHCR write token. It never receives the VPS private key. It produces an immutable digest and candidate only.
+Uses environment `p1-source-build`, has the private-source deploy key and
+job-scoped GHCR write token. It never receives the VPS private key. It produces
+an immutable digest and candidate only.
 
 ### `deploy`
 
-Checks out only protected public release-control code. It has the restricted VPS key but no private application source checkout and executes no private-source shell script on the host.
+Uses environment `p1-vps-deploy` and checks out only protected public
+release-control code. It has the restricted VPS key but no private application
+source checkout and executes no private-source shell script on the host.
 
 ### `finalize`
 
@@ -148,6 +164,17 @@ P1_STAGING_BUILD_ONLY_ENABLED=true
 ```
 
 This mode may validate the private-source key, build the exact candidate, create/verify the private GHCR package and run image health checks, but it has no VPS deployment job. It is the intended first package-bootstrap path.
+
+The dispatch caller must provide `source_sha` as exactly 40 lowercase hex. The
+workflow proves it equals the current remote `refs/heads/ai-dev` HEAD. Build-only
+does not read or derive any value from `release/staging.json`; it emits only:
+
+```text
+bootstrap-sha-<source_sha>
+sha-<source_sha>
+```
+
+and leaves the deployed tag empty.
 
 The candidate remains under the normal 48-hour cleanup grace window and does not receive a `deployed-seq-*` tag.
 

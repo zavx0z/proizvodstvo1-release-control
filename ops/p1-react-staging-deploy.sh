@@ -276,8 +276,16 @@ append_ledger() {
   ACTIVE_TMP=""
 }
 
+restore_previous_portal_best_effort() {
+  local previous="$1" restored=""
+  write_image_env "$previous"
+  "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null 2>&1 || true
+  restored="$(portal_id)"
+  [[ -n "$restored" ]] && check_health "$restored" >/dev/null 2>&1 || true
+}
+
 apply_live_image() {
-  local image="$1" previous="$2" before_nginx after_nginx new_id restored
+  local image="$1" previous="$2" before_nginx after_nginx new_id
   valid_known_image "$image" || fail "apply target is outside allowed repositories"
   valid_known_image "$previous" || fail "restore target is outside allowed repositories"
   before_nginx="$(nginx_id)"
@@ -285,26 +293,26 @@ apply_live_image() {
 
   write_image_env "$image"
   if ! "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null; then
-    write_image_env "$previous"
-    "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null 2>&1 || true
+    restore_previous_portal_best_effort "$previous"
     return 1
   fi
 
   new_id="$(portal_id)"
-  [[ -n "$new_id" ]] || return 1
+  if [[ -z "$new_id" ]]; then
+    echo "portal container ID is missing after update; restoring previous portal" >&2
+    restore_previous_portal_best_effort "$previous"
+    return 1
+  fi
   if ! check_health "$new_id"; then
-    write_image_env "$previous"
-    "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null 2>&1 || true
-    restored="$(portal_id)"
-    [[ -n "$restored" ]] && check_health "$restored" >/dev/null 2>&1 || true
+    restore_previous_portal_best_effort "$previous"
     return 1
   fi
 
   after_nginx="$(nginx_id)"
   if [[ "$after_nginx" != "$before_nginx" ]]; then
-    write_image_env "$previous"
-    "${compose[@]}" up -d --no-deps "$PORTAL_SERVICE" >/dev/null 2>&1 || true
-    fail "staging Nginx container changed during portal update"
+    echo "staging Nginx container changed during portal update; restoring previous portal" >&2
+    restore_previous_portal_best_effort "$previous"
+    return 1
   fi
 
   echo "PORTAL_CONTAINER_AFTER=$new_id"

@@ -18,7 +18,10 @@ API_ROOT = "https://api.github.com"
 DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 SEQ_TAG_RE = re.compile(r"(?:deployed-)?seq-([1-9][0-9]*)")
 SOURCE_TAG_RE = re.compile(r"sha-[0-9a-f]{40}")
-ALLOWED_TAG_RE = re.compile(r"(?:seq-[1-9][0-9]*|deployed-seq-[1-9][0-9]*|sha-[0-9a-f]{40})")
+BOOTSTRAP_TAG_RE = re.compile(r"bootstrap-sha-[0-9a-f]{40}")
+ALLOWED_TAG_RE = re.compile(
+    rf"(?:{SEQ_TAG_RE.pattern}|{SOURCE_TAG_RE.pattern}|{BOOTSTRAP_TAG_RE.pattern})"
+)
 
 
 class CleanupError(RuntimeError):
@@ -289,6 +292,45 @@ def self_test() -> None:
     kept = {item.version_id for item in versions if item.version_id in plan.keep_ids}
     assert kept == {1, 2, 3, 4, 5, 6, 8}
     assert [item.version_id for item in plan.delete] == [7]
+
+    bootstrap = parse_version(
+        {
+            "id": 98,
+            "name": "sha256:" + "8" * 64,
+            "created_at": "2026-08-30T00:00:00Z",
+            "metadata": {
+                "container": {
+                    "tags": [
+                        "bootstrap-sha-" + "b" * 40,
+                        "sha-" + "b" * 40,
+                    ]
+                }
+            },
+        }
+    )
+    assert bootstrap.tags == (
+        "bootstrap-sha-" + "b" * 40,
+        "sha-" + "b" * 40,
+    )
+
+    for invalid_bootstrap_tag in (
+        "bootstrap-sha-" + "B" * 40,
+        "bootstrap-sha-" + "b" * 39,
+        "bootstrap-sha-" + "b" * 41,
+    ):
+        try:
+            parse_version(
+                {
+                    "id": 97,
+                    "name": "sha256:" + "7" * 64,
+                    "created_at": "2026-08-30T00:00:00Z",
+                    "metadata": {"container": {"tags": [invalid_bootstrap_tag]}},
+                }
+            )
+        except CleanupError as error:
+            assert "unknown tags" in str(error)
+        else:
+            raise AssertionError("inexact bootstrap GHCR tag was accepted")
 
     try:
         parse_version(

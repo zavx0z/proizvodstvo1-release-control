@@ -25,6 +25,12 @@ def fail(message: str) -> None:
     raise PreflightError(message)
 
 
+def validate_source_sha(value: str, label: str = "source_sha") -> str:
+    if not isinstance(value, str) or not SHA_RE.fullmatch(value):
+        fail(f"{label} must be 40 lowercase hex")
+    return value
+
+
 def validate_manifest(path: pathlib.Path) -> dict:
     try:
         raw = path.read_text("utf-8")
@@ -61,8 +67,7 @@ def validate_manifest(path: pathlib.Path) -> dict:
         fail("source_repository is fixed")
     if value["source_ref"] != SOURCE_REF:
         fail("source_ref is fixed")
-    if not isinstance(value["source_sha"], str) or not SHA_RE.fullmatch(value["source_sha"]):
-        fail("source_sha must be 40 lowercase hex")
+    validate_source_sha(value["source_sha"])
     if type(value["sequence"]) is not int or value["sequence"] < 1:
         fail("sequence must be a positive integer")
 
@@ -96,15 +101,27 @@ def git(source_dir: pathlib.Path, *args: str) -> str:
         fail(f"git {' '.join(args)} failed: {error.output.strip()}")
 
 
-def validate_source(source_dir: pathlib.Path, manifest: dict) -> None:
+def validate_source(source_dir: pathlib.Path, expected_source_sha: str) -> None:
     if not source_dir.is_dir() or not (source_dir / ".git").exists():
         fail("private source checkout is missing")
 
     actual_sha = git(source_dir, "rev-parse", "HEAD")
-    if actual_sha != manifest["source_sha"]:
+    validate_source_sha(actual_sha, "checked-out source SHA")
+
+    current_ai_dev_sha = validate_source_sha(
+        git(source_dir, "rev-parse", "--verify", "refs/remotes/origin/ai-dev"),
+        "current ai-dev HEAD",
+    )
+
+    if actual_sha != current_ai_dev_sha:
         fail(
-            "manifest source_sha does not match checked out ai-dev HEAD: "
-            f"manifest={manifest['source_sha']} checkout={actual_sha}"
+            "checked-out source is not the current ai-dev HEAD: "
+            f"checkout={actual_sha} current={current_ai_dev_sha}"
+        )
+    if actual_sha != expected_source_sha:
+        fail(
+            "requested source SHA does not match current ai-dev HEAD: "
+            f"requested={expected_source_sha} current={current_ai_dev_sha}"
         )
 
     if git(source_dir, "status", "--porcelain"):
@@ -130,26 +147,50 @@ def append_output(path: str | None, key: str, value: str) -> None:
         handle.write(f"{key}={value}\n")
 
 
-def run(manifest_path: pathlib.Path, source_dir: pathlib.Path | None, output: str | None) -> None:
-    manifest = validate_manifest(manifest_path)
-    if source_dir is not None:
-        validate_source(source_dir, manifest)
-
-    sequence = str(manifest["sequence"])
-    source_sha = manifest["source_sha"]
-    values = {
-        "sequence": sequence,
-        "source_sha": source_sha,
-        "image_repository": IMAGE_REPOSITORY,
-        "candidate_tag": f"seq-{sequence}",
-        "source_tag": f"sha-{source_sha}",
-        "deployed_tag": f"deployed-seq-{sequence}",
-    }
+def run(
+    manifest_path: pathlib.Path,
+    source_dir: pathlib.Path | None,
+    bootstrap_source_sha: str | None,
+    output: str | None,
+) -> None:
+    if bootstrap_source_sha is not None:
+        source_sha = validate_source_sha(
+            bootstrap_source_sha, "bootstrap source SHA"
+        )
+        if source_dir is None:
+            fail("bootstrap mode requires --source-dir")
+        validate_source(source_dir, source_sha)
+        mode = "bootstrap"
+        sequence = ""
+        values = {
+            "sequence": "",
+            "source_sha": source_sha,
+            "image_repository": IMAGE_REPOSITORY,
+            "candidate_tag": f"bootstrap-sha-{source_sha}",
+            "source_tag": f"sha-{source_sha}",
+            "deployed_tag": "",
+        }
+    else:
+        manifest = validate_manifest(manifest_path)
+        source_sha = manifest["source_sha"]
+        if source_dir is not None:
+            validate_source(source_dir, source_sha)
+        mode = "normal"
+        sequence = str(manifest["sequence"])
+        values = {
+            "sequence": sequence,
+            "source_sha": source_sha,
+            "image_repository": IMAGE_REPOSITORY,
+            "candidate_tag": f"seq-{sequence}",
+            "source_tag": f"sha-{source_sha}",
+            "deployed_tag": f"deployed-seq-{sequence}",
+        }
     for key, value in values.items():
         append_output(output, key, value)
     print(
         "P1_PUBLISH_PREFLIGHT_VALID "
-        f"sequence={sequence} source_sha={source_sha} source_checked={source_dir is not None}"
+        f"mode={mode} sequence={sequence} source_sha={source_sha} "
+        f"source_checked={source_dir is not None}"
     )
 
 
@@ -157,7 +198,43 @@ def self_test() -> None:
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
-        path = pathlib.Path(tmp) / "staging.json"
+        root = pathlib.Path(tmp)
+        source = root / "source"
+        remote = root / "source.git"
+        source.mkdir()
+
+        def checked_git(cwd: pathlib.Path, *args: str) -> str:
+            return subprocess.check_output(
+                ["git", "-C", str(cwd), *args], text=True
+            ).strip()
+
+        checked_git(source, "init", "-b", "ai-dev")
+        checked_git(source, "config", "user.name", "self-test")
+        checked_git(source, "config", "user.email", "self-test@example.invalid")
+        for relative in (
+            "package.json",
+            "bun.lock",
+            "app/ai/package.json",
+            "app/ai/Dockerfile.release",
+            "app/ai/Dockerfile.release.dockerignore",
+            "pkg/institute/README.md",
+        ):
+            target = source / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("self-test\n", "utf-8")
+        checked_git(source, "add", ".")
+        checked_git(source, "commit", "-m", "self-test source")
+        subprocess.run(
+            ["git", "clone", "--bare", str(source), str(remote)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        checked_git(source, "remote", "add", "origin", str(remote))
+        checked_git(source, "push", "-u", "origin", "ai-dev")
+        source_sha = checked_git(source, "rev-parse", "HEAD")
+
+        path = root / "staging.json"
         path.write_text(
             json.dumps(
                 {
@@ -165,7 +242,7 @@ def self_test() -> None:
                     "environment": "staging",
                     "source_repository": SOURCE_REPOSITORY,
                     "source_ref": SOURCE_REF,
-                    "source_sha": "a" * 40,
+                    "source_sha": source_sha,
                     "sequence": 2,
                     "requested_at": "2026-08-30T00:00:00Z",
                     "summary": "self-test",
@@ -175,6 +252,73 @@ def self_test() -> None:
         )
         value = validate_manifest(path)
         assert value["sequence"] == 2
+
+        normal_output = root / "normal.out"
+        run(path, source, None, str(normal_output))
+        normal = dict(
+            line.split("=", 1)
+            for line in normal_output.read_text("utf-8").splitlines()
+        )
+        assert normal == {
+            "sequence": "2",
+            "source_sha": source_sha,
+            "image_repository": IMAGE_REPOSITORY,
+            "candidate_tag": "seq-2",
+            "source_tag": f"sha-{source_sha}",
+            "deployed_tag": "deployed-seq-2",
+        }
+
+        bootstrap_output = root / "bootstrap.out"
+        run(
+            root / "manifest-must-not-be-read.json",
+            source,
+            source_sha,
+            str(bootstrap_output),
+        )
+        bootstrap = dict(
+            line.split("=", 1)
+            for line in bootstrap_output.read_text("utf-8").splitlines()
+        )
+        assert bootstrap == {
+            "sequence": "",
+            "source_sha": source_sha,
+            "image_repository": IMAGE_REPOSITORY,
+            "candidate_tag": f"bootstrap-sha-{source_sha}",
+            "source_tag": f"sha-{source_sha}",
+            "deployed_tag": "",
+        }
+
+        for invalid in ("A" * 40, "a" * 39, "a" * 41):
+            try:
+                validate_source_sha(invalid, "bootstrap source SHA")
+            except PreflightError:
+                pass
+            else:
+                raise AssertionError("invalid bootstrap source SHA was accepted")
+
+        try:
+            run(root / "missing.json", None, source_sha, None)
+        except PreflightError as error:
+            assert "requires --source-dir" in str(error)
+        else:
+            raise AssertionError("bootstrap mode without source checkout was accepted")
+
+        try:
+            run(path, source, "b" * 40, None)
+        except PreflightError as error:
+            assert "current ai-dev HEAD" in str(error)
+        else:
+            raise AssertionError("non-current bootstrap source SHA was accepted")
+
+        (source / "package.json").write_text("new unpushed HEAD\n", "utf-8")
+        checked_git(source, "add", "package.json")
+        checked_git(source, "commit", "-m", "unpushed self-test drift")
+        try:
+            validate_source(source, source_sha)
+        except PreflightError as error:
+            assert "not the current ai-dev HEAD" in str(error)
+        else:
+            raise AssertionError("source checkout ahead of current ai-dev was accepted")
 
         bad = json.loads(path.read_text("utf-8"))
         bad["source_sha"] = "BAD"
@@ -193,6 +337,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", default=str(MANIFEST_PATH))
     parser.add_argument("--source-dir")
+    parser.add_argument("--bootstrap-source-sha")
     parser.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT"))
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
@@ -203,6 +348,7 @@ def main() -> int:
             run(
                 pathlib.Path(args.manifest),
                 pathlib.Path(args.source_dir) if args.source_dir else None,
+                args.bootstrap_source_sha,
                 args.github_output,
             )
     except (PreflightError, AssertionError, OSError, UnicodeError) as error:

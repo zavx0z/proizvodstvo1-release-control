@@ -15,6 +15,10 @@ on:
         default: build-only
         options:
           - build-only
+      source_sha:
+        description: "Exact current refs/heads/ai-dev SHA for build-only"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -31,6 +35,7 @@ jobs:
   vps-preflight:
     name: Read restricted VPS state
     if: github.event_name == 'push'
+    environment: p1-vps-deploy
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -147,6 +152,7 @@ jobs:
     if: >-
       always() &&
       (github.event_name == 'workflow_dispatch' || needs.vps-preflight.result == 'success')
+    environment: p1-source-build
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -166,6 +172,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           DISPATCH_MODE: ${{ inputs.mode }}
+          DISPATCH_SOURCE_SHA: ${{ inputs.source_sha }}
           BUILD_ONLY_ENABLED: ${{ vars.P1_STAGING_BUILD_ONLY_ENABLED }}
           PUBLISH_ENABLED: ${{ vars.P1_STAGING_PUBLISH_ENABLED }}
           SOURCE_KEY: ${{ secrets.P1_SOURCE_DEPLOY_KEY }}
@@ -174,6 +181,7 @@ jobs:
           [[ -n "$SOURCE_KEY" ]] || { echo "P1_SOURCE_DEPLOY_KEY is missing" >&2; exit 1; }
           if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
             [[ "$DISPATCH_MODE" == build-only ]] || { echo "manual mode must be build-only" >&2; exit 1; }
+            [[ "$DISPATCH_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "source_sha must be exactly 40 lowercase hex" >&2; exit 1; }
             [[ "$BUILD_ONLY_ENABLED" == true ]] || { echo "P1_STAGING_BUILD_ONLY_ENABLED is not true" >&2; exit 1; }
           else
             [[ "$EVENT_NAME" == push ]] || { echo "unexpected event" >&2; exit 1; }
@@ -189,6 +197,7 @@ jobs:
 
       - name: Read release manifest
         id: manifest
+        if: github.event_name == 'push'
         run: python3 scripts/publish_preflight.py --manifest release/staging.json
 
       - name: Pre-release bounded GHCR cleanup
@@ -220,7 +229,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: zavx0z/proizvodstvo1
-          ref: ai-dev
+          ref: refs/heads/ai-dev
           path: source-checkout
           fetch-depth: 1
           persist-credentials: false
@@ -229,11 +238,20 @@ jobs:
       - name: Prove current ai-dev and freeze immutable source archive
         id: source
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BOOTSTRAP_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          python3 scripts/publish_preflight.py \
-            --manifest release/staging.json \
-            --source-dir source-checkout
+          if [[ "$EVENT_NAME" == workflow_dispatch ]]; then
+            python3 scripts/publish_preflight.py \
+              --bootstrap-source-sha "$BOOTSTRAP_SOURCE_SHA" \
+              --source-dir source-checkout
+          else
+            python3 scripts/publish_preflight.py \
+              --manifest release/staging.json \
+              --source-dir source-checkout
+          fi
 
           python3 - <<'PY'
           import subprocess
@@ -397,14 +415,18 @@ jobs:
         shell: bash
         env:
           SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
-          SEQUENCE: ${{ steps.source.outputs.sequence }}
+          CANDIDATE_TAG: ${{ steps.source.outputs.candidate_tag }}
+          SOURCE_TAG: ${{ steps.source.outputs.source_tag }}
+          DEPLOYED_TAG: ${{ steps.source.outputs.deployed_tag }}
           IMAGE: ${{ steps.image.outputs.image }}
         run: |
+          [[ -z "$DEPLOYED_TAG" ]] || { echo "build-only must not produce a deployed tag" >&2; exit 1; }
           {
             echo "## GHCR build-only bootstrap complete"
             echo
-            echo "- Sequence: \`$SEQUENCE\`"
             echo "- Source SHA: \`$SOURCE_SHA\`"
+            echo "- Candidate tag: \`$CANDIDATE_TAG\`"
+            echo "- Source tag: \`$SOURCE_TAG\`"
             echo "- Candidate: \`$IMAGE\`"
             echo "- Live staging: not touched"
             echo "- Candidate remains protected by the 48h GHCR grace window"
@@ -435,6 +457,7 @@ jobs:
       - vps-preflight
       - build
     if: github.event_name == 'push'
+    environment: p1-vps-deploy
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

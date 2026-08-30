@@ -102,6 +102,17 @@ P1_STAGING_BUILD_ONLY_ENABLED=true
 
 Build-only validates source access, repeats application gates, builds the exact image, creates/verifies the private GHCR package and tests the image. It has no VPS deployment job and cannot mutate live staging.
 
+The dispatch also requires:
+
+```text
+source_sha=<exact 40 lowercase hex current refs/heads/ai-dev SHA>
+```
+
+The preflight reads the current remote `ai-dev` HEAD and requires both the
+checked-out HEAD and explicit `source_sha` to equal it. Build-only does not read
+`release/staging.json`, does not use its sequence or source SHA, and produces an
+empty deployed tag. Deploy and finalize jobs remain skipped.
+
 ## 6. Private source proof and immutable snapshots
 
 The build job checks out only:
@@ -111,10 +122,18 @@ zavx0z/proizvodstvo1
 branch: ai-dev
 ```
 
-through a dedicated read-only deploy key, then proves:
+through a dedicated read-only deploy key. Normal publication proves:
 
 ```text
 checked-out ai-dev HEAD == release/staging.json:source_sha
+```
+
+Build-only instead proves:
+
+```text
+checked-out ai-dev HEAD
+== current remote refs/heads/ai-dev HEAD
+== explicit workflow_dispatch source_sha
 ```
 
 If they differ, publication stops before image build or deployment.
@@ -172,6 +191,15 @@ Candidate traceability tags:
 seq-<sequence>
 sha-<source_sha>
 ```
+
+Build-only has no release sequence and uses exactly:
+
+```text
+bootstrap-sha-<source_sha>
+sha-<source_sha>
+```
+
+It never creates a `deployed-seq-*` tag.
 
 Before any deployment, the workflow verifies through GitHub Packages API that the package visibility is exactly `private`.
 

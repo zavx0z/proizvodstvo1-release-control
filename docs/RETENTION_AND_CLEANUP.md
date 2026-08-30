@@ -56,7 +56,13 @@ Candidate tags:
 ```text
 seq-<N>
 sha-<source-sha>
+bootstrap-sha-<source-sha>
 ```
+
+`bootstrap-sha-<source-sha>` is allowed only with exactly 40 lowercase hex and
+is used only by explicit-SHA build-only runs. A bootstrap version has no
+`deployed-seq-*` tag and remains subject to the same 48-hour grace and bounded
+orphan cleanup rules.
 
 A successfully committed deployment additionally points:
 

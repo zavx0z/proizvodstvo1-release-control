@@ -120,5 +120,57 @@ jobs:
                   if value != checkout:
                       raise SystemExit(f"unapproved or unpinned Action {value!r} in {path}")
 
+          publish = pathlib.Path(".github/workflows/publish-staging.yml").read_text("utf-8")
+          cleanup = pathlib.Path(".github/workflows/ghcr-cleanup.yml").read_text("utf-8")
+
+          expected_environment_counts = {
+              "publish p1-source-build": (
+                  publish.count("\n    environment: p1-source-build\n"),
+                  1,
+              ),
+              "publish p1-vps-deploy": (
+                  publish.count("\n    environment: p1-vps-deploy\n"),
+                  2,
+              ),
+              "cleanup p1-vps-deploy": (
+                  cleanup.count("\n    environment: p1-vps-deploy\n"),
+                  1,
+              ),
+          }
+          for label, (actual, expected) in expected_environment_counts.items():
+              if actual != expected:
+                  raise SystemExit(
+                      f"unexpected environment reference count for {label}: "
+                      f"expected {expected}, got {actual}"
+                  )
+
+          build_only_tokens = (
+              "\n      source_sha:\n"
+              '        description: "Exact current refs/heads/ai-dev SHA for build-only"\n'
+              "        required: true\n"
+              "        type: string\n",
+              'DISPATCH_SOURCE_SHA: ${{ inputs.source_sha }}',
+              '[[ "$DISPATCH_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]',
+              '--bootstrap-source-sha "$BOOTSTRAP_SOURCE_SHA"',
+              'candidate_tag": f"bootstrap-sha-',
+          )
+          combined = publish + "\n" + pathlib.Path(
+              "scripts/publish_preflight.py"
+          ).read_text("utf-8")
+          for token in build_only_tokens:
+              if token not in combined:
+                  raise SystemExit(f"missing explicit build-only source contract: {token}")
+
+          if "\n  schedule:\n" not in cleanup:
+              raise SystemExit("GHCR cleanup must retain its scheduled trigger")
+
+          wrapper = pathlib.Path("ops/p1-react-staging-deploy.sh").read_text("utf-8")
+          if 'if [[ -z "$new_id" ]]; then' not in wrapper:
+              raise SystemExit("missing empty portal ID restoration branch")
+          if wrapper.count('restore_previous_portal_best_effort "$previous"') < 4:
+              raise SystemExit("portal restoration is not applied to every failure branch")
+          if 'fail "staging Nginx container changed during portal update"' in wrapper:
+              raise SystemExit("Nginx drift must return to caller after portal restoration")
+
           print("P1_RELEASE_CONTROL_WORKFLOW_POLICY_VALID")
           PY
