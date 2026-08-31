@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "3aa1a8ce921b2748cb2d57cbc7537b691569f394",
-  "sequence": 3,
-  "requested_at": "2026-08-31T10:42:23Z",
-  "summary": "Fix missing React staging home background asset"
+  "source_sha": "1e84429f86155efe9958c6bcf428dcfc1241580c",
+  "sequence": 4,
+  "requested_at": "2026-08-31T11:04:00Z",
+  "summary": "Restore original isometric React homepage map"
 }
