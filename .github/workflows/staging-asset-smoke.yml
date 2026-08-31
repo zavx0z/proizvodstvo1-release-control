@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - maintenance/staging-asset-smoke
     paths:
       - "release/staging.json"
       - ".github/workflows/staging-asset-smoke.yml"
@@ -36,7 +37,7 @@ jobs:
               "$base_url$1"
           }
 
-          for attempt in $(seq 1 30); do
+          for attempt in $(seq 1 12); do
             rm -f -- "$tmp"/*
             root_status="$(fetch / "$tmp/root.body" "$tmp/root.headers" || true)"
             home_asset_status="$(fetch /assets/img/photos/home-bg-landscape.png "$tmp/home.body" "$tmp/home.headers" || true)"
@@ -62,7 +63,7 @@ jobs:
             sleep 10
           done
 
-          echo "React staging asset smoke failed after 30 attempts" >&2
+          echo "React staging asset smoke failed after 12 attempts" >&2
           echo "ROOT_HEADERS_SHA256=$(sha256sum "$tmp/root.headers" | awk '{print $1}')" >&2
           echo "ROOT_BODY_SHA256=$(sha256sum "$tmp/root.body" | awk '{print $1}')" >&2
           echo "HOME_HEADERS_SHA256=$(sha256sum "$tmp/home.headers" | awk '{print $1}')" >&2
