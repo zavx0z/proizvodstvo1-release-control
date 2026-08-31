@@ -82,7 +82,7 @@ It contains:
 - private-package visibility check;
 - release image revision/health check;
 - split credential jobs: VPS preflight / source build / VPS deploy / GHCR finalize;
-- restricted root-owned transactional VPS wrapper;
+- restricted owner-scoped transactional VPS wrapper;
 - protected control-side full staging smoke;
 - bounded GHCR cleanup;
 - bounded VPS current/rollback/safety ring;
@@ -111,16 +111,18 @@ Manual review caught and corrected these issues before merge:
     expose only generic status plus diagnostic bytes/SHA-256 on failure.
 14. VPS pending state is durable before image pull; pull failure transitions
     through durable exact blocked cleanup evidence.
-15. VPS Docker pull credentials require root ownership and no group/other mode
-    bits, with contents never printed.
+15. VPS Docker pull credentials require current-user ownership and no
+    group/other mode bits, with contents never printed.
 
-## External setup is still absent
+## Owner-scoped external setup
 
-No external installation is authorized yet. The following still require a separate Codex task after PR #5 is reviewed and separately authorized for merge:
+Owner-scoped launch is authorized only by external Issue #38. Until this
+maintenance code is merged and that task installs the boundary, the following
+remain absent:
 
 - `P1_SOURCE_DEPLOY_KEY` read-only deploy key;
-- restricted VPS SSH account/key/forced command;
-- root-owned VPS wrapper/config installation;
+- unique restricted SSH key/forced command in the trusted `zavx0z` account;
+- owner-scoped wrapper/config/state under `/home/zavx0z/.p1-react-staging`;
 - VPS pull-only GHCR credential;
 - release-control secrets/variables;
 - GHCR package/bootstrap access verification;
@@ -136,16 +138,16 @@ P1_STAGING_MAINTENANCE_ENABLED
 
 Therefore there is no route from this maintenance PR to live deployment.
 
-## Planned bootstrap sequence after PR #5 acceptance
+## Authorized owner-scoped launch sequence
 
-1. After PR #5 is accepted, create a new exact external installation Issue; do not reuse Issue #15.
+1. Merge this owner-scoped maintenance PR through protected public `main`.
 2. Install credentials/wrapper with all enabling variables false.
 3. Run wrapper self-test and VPS `state` only; no live deploy.
 4. Temporarily enable only `P1_STAGING_BUILD_ONLY_ENABLED` and run build-only to create/verify the private GHCR package without VPS deployment.
 5. Configure and prove VPS pull-only access to that one package.
 6. Disable build-only again and review cleanup evidence.
-7. Obtain separate Vladimir authorization before merging source-side PR #6 into `ai-dev` if still required.
-8. Obtain separate Vladimir authorization before the first manifest sequence that performs the controlled functionally-no-op live migration.
+7. Merge separately verified source-side PR #6 only into `ai-dev` under Issue #38 authority.
+8. Create and merge the first manifest sequence only under Issue #38 authority.
 
 ## Cleanup invariant
 

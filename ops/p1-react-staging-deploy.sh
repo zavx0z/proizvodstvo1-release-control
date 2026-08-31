@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly CONFIG_FILE="/etc/p1-react-staging/deploy.env"
+readonly CONFIG_FILE="/home/zavx0z/.p1-react-staging/config/deploy.env"
 readonly PROJECT_NAME="proizvodstvo1-react-staging"
 readonly TARGET_RE='^ghcr\.io/zavx0z/proizvodstvo1-react-portal@sha256:[0-9a-f]{64}$'
 readonly LEGACY_RE='^10\.66\.0\.10:5000/platform/proizvodstvo1-react-portal@sha256:[0-9a-f]{64}$'
@@ -32,7 +32,7 @@ self_test() {
   local a b c n action image extra runtime_block deploy_block write_block
   local deprecated_restore commit_block durable_marker delete_marker normal_pull_block
   local pending_marker pending_save pull_marker pull_failure_block blocked_marker
-  local blocked_save blocked_delete private_file_block config_usage_block
+  local blocked_save blocked_delete private_file_block config_usage_block compose_block owner_header expected_config
   a="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'a%.0s' {1..64})"
   b="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'b%.0s' {1..64})"
   c="ghcr.io/zavx0z/proizvodstvo1-react-portal@sha256:$(printf 'c%.0s' {1..64})"
@@ -81,11 +81,17 @@ self_test() {
   [[ "$blocked_marker" =~ ^[0-9]+$ && "$blocked_save" =~ ^[0-9]+$ && "$blocked_delete" =~ ^[0-9]+$ ]]
   (( blocked_marker < blocked_save && blocked_save < blocked_delete ))
 
-  private_file_block="$(sed -n '/^require_private_root_file()/,/^}/p' "$0")"
-  config_usage_block="$(sed -n '/^require_private_root_file()/,/^ACTIVE_TMP=/p' "$0")"
-  [[ "$private_file_block" == *'! -L "$path"'* || "$private_file_block" == *'require_root_file "$path"'* ]]
+  private_file_block="$(sed -n '/^require_private_owner_file()/,/^}/p' "$0")"
+  config_usage_block="$(sed -n '/^require_private_owner_file()/,/^ACTIVE_TMP=/p' "$0")"
+  compose_block="$(sed -n '/^compose=(/,/^)/p' "$0")"
+  owner_header="$(sed -n '1,/^ACTIVE_TMP=/p' "$0")"
+  expected_config="/home/zavx0z/.p1-react-staging/config/""deploy.env"
+  [[ "$private_file_block" == *'! -L "$path"'* || "$private_file_block" == *'require_owner_file "$path"'* ]]
   [[ "$private_file_block" == *'(8#$mode & 0077)'* ]]
-  [[ "$config_usage_block" == *'require_private_root_file "$DOCKER_CONFIG_DIR/config.json"'* ]]
+  [[ "$config_usage_block" == *'require_private_owner_file "$DOCKER_CONFIG_DIR/config.json"'* ]]
+  [[ "$owner_header" == *"$expected_config"* ]]
+  [[ "$config_usage_block" == *'STAGING_OVERRIDE_FILE'* ]]
+  [[ "$compose_block" == *'-f "$STAGING_OVERRIDE_FILE"'* ]]
 
   commit_block="$(sed -n '/^  commit)/,/^  rollback)/p' "$0")"
   durable_marker="$(printf '%s\n' "$commit_block" | grep -n 'Durably commit the new ring before exact outgoing deletion' | cut -d: -f1)"
@@ -103,26 +109,29 @@ if [[ "${1:-}" == "--self-test" ]]; then
 fi
 [[ "$#" == 0 ]] || fail "arguments are forbidden; use forced SSH command"
 
-require_root_file() {
+readonly OWNER_UID="$(id -u)"
+readonly OWNER_GID="$(id -g)"
+
+require_owner_file() {
   local path="$1"
   [[ -f "$path" && ! -L "$path" ]] || fail "missing regular file: $path"
-  [[ "$(stat -c '%u' "$path")" == 0 ]] || fail "file must be root-owned: $path"
+  [[ "$(stat -c '%u' "$path")" == "$OWNER_UID" ]] || fail "file must be owned by current user: $path"
   local mode
   mode="$(stat -c '%a' "$path")"
   (( (8#$mode & 0022) == 0 )) || fail "file must not be group/other writable: $path"
 }
 
-require_private_root_file() {
+require_private_owner_file() {
   local path="$1" mode
-  require_root_file "$path"
+  require_owner_file "$path"
   mode="$(stat -c '%a' "$path")"
   (( (8#$mode & 0077) == 0 )) || fail "private file must have no group/other permissions: $path"
 }
 
-require_root_dir() {
+require_owner_dir() {
   local path="$1"
   [[ -d "$path" && ! -L "$path" ]] || fail "missing real directory: $path"
-  [[ "$(stat -c '%u' "$path")" == 0 ]] || fail "directory must be root-owned: $path"
+  [[ "$(stat -c '%u' "$path")" == "$OWNER_UID" ]] || fail "directory must be owned by current user: $path"
   local mode
   mode="$(stat -c '%a' "$path")"
   (( (8#$mode & 0022) == 0 )) || fail "directory must not be group/other writable: $path"
@@ -134,18 +143,19 @@ validate_image_env_target() {
   [[ -f "$target" && ! -L "$target" ]] || return 1
   [[ "$(realpath -e -- "$parent" 2>/dev/null || true)" == "$parent" ]] || return 1
   [[ "$(realpath -e -- "$target" 2>/dev/null || true)" == "$target" ]] || return 1
-  [[ "$(stat -c '%u' "$parent")" == 0 && "$(stat -c '%u' "$target")" == 0 ]] || return 1
+  [[ "$(stat -c '%u' "$parent")" == "$OWNER_UID" && "$(stat -c '%u' "$target")" == "$OWNER_UID" ]] || return 1
   mode="$(stat -c '%a' "$parent")"
   (( (8#$mode & 0022) == 0 )) || return 1
   mode="$(stat -c '%a' "$target")"
   (( (8#$mode & 0022) == 0 )) || return 1
 }
 
-require_root_file "$CONFIG_FILE"
-# shellcheck disable=SC1090 -- fixed, root-owned config path.
+require_private_owner_file "$CONFIG_FILE"
+# shellcheck disable=SC1090 -- fixed, owner-only config path.
 source "$CONFIG_FILE"
 
 : "${STAGING_COMPOSE_FILE:?missing STAGING_COMPOSE_FILE}"
+: "${STAGING_OVERRIDE_FILE:?missing STAGING_OVERRIDE_FILE}"
 : "${STAGING_RUNTIME_ENV:?missing STAGING_RUNTIME_ENV}"
 : "${STAGING_IMAGE_ENV:?missing STAGING_IMAGE_ENV}"
 : "${STATE_DIR:?missing STATE_DIR}"
@@ -158,21 +168,22 @@ source "$CONFIG_FILE"
 [[ "$PORTAL_SERVICE" == "portal" ]] || fail "PORTAL_SERVICE must be portal"
 [[ "$NGINX_SERVICE" =~ ^[A-Za-z0-9._-]+$ ]] || fail "invalid NGINX_SERVICE"
 [[ "$MIN_FREE_KB" =~ ^[0-9]+$ && "$MIN_FREE_KB" -ge 1048576 ]] || fail "MIN_FREE_KB must be >= 1 GiB"
-[[ "$STATE_DIR" = /* && "$STAGING_COMPOSE_FILE" = /* && "$STAGING_RUNTIME_ENV" = /* && "$STAGING_IMAGE_ENV" = /* && "$DOCKER_CONFIG_DIR" = /* ]] || fail "all configured paths must be absolute"
+[[ "$STATE_DIR" = /* && "$STAGING_COMPOSE_FILE" = /* && "$STAGING_OVERRIDE_FILE" = /* && "$STAGING_RUNTIME_ENV" = /* && "$STAGING_IMAGE_ENV" = /* && "$DOCKER_CONFIG_DIR" = /* ]] || fail "all configured paths must be absolute"
 
 command -v realpath >/dev/null 2>&1 || fail "realpath is required"
 readonly IMAGE_ENV_PARENT="$(dirname -- "$STAGING_IMAGE_ENV")"
-validate_image_env_target "$IMAGE_ENV_PARENT" "$STAGING_IMAGE_ENV" || fail "STAGING_IMAGE_ENV and its canonical parent must be root-owned regular paths without symlinks or group/other write"
+validate_image_env_target "$IMAGE_ENV_PARENT" "$STAGING_IMAGE_ENV" || fail "STAGING_IMAGE_ENV and its canonical parent must be owner-only regular paths without symlinks or group/other write"
 
-require_root_file "$STAGING_COMPOSE_FILE"
-require_root_file "$STAGING_RUNTIME_ENV"
-require_root_dir "$DOCKER_CONFIG_DIR"
-require_private_root_file "$DOCKER_CONFIG_DIR/config.json"
+require_owner_file "$STAGING_COMPOSE_FILE"
+require_owner_file "$STAGING_OVERRIDE_FILE"
+require_owner_file "$STAGING_RUNTIME_ENV"
+require_owner_dir "$DOCKER_CONFIG_DIR"
+require_private_owner_file "$DOCKER_CONFIG_DIR/config.json"
 
 if [[ ! -d "$STATE_DIR" ]]; then
-  install -d -m 0750 -o root -g root "$STATE_DIR"
+  install -d -m 0700 "$STATE_DIR"
 fi
-require_root_dir "$STATE_DIR"
+require_owner_dir "$STATE_DIR"
 
 readonly STATE_FILE="$STATE_DIR/$STATE_BASENAME"
 readonly LEDGER_FILE="$STATE_DIR/$LEDGER_BASENAME"
@@ -200,6 +211,7 @@ compose=(
   --env-file "$STAGING_RUNTIME_ENV"
   --env-file "$STAGING_IMAGE_ENV"
   -f "$STAGING_COMPOSE_FILE"
+  -f "$STAGING_OVERRIDE_FILE"
 )
 
 services="$("${compose[@]}" config --services | LC_ALL=C sort)"
@@ -209,8 +221,8 @@ expected_services="$(printf '%s\n%s\n' "$NGINX_SERVICE" "$PORTAL_SERVICE" | LC_A
 exec 9>"$LOCK_FILE"
 flock -n 9 || fail "another staging release operation is active"
 
-find "$STATE_DIR" -maxdepth 1 -type f -user root \( -name '.p1tmp.state.*' -o -name '.p1tmp.ledger.*' \) -mmin +1440 -delete || fail "stale state temp cleanup failed"
-find "$IMAGE_ENV_PARENT" -maxdepth 1 -type f -user root -name '.p1tmp.image-env.*' -mmin +1440 -delete || fail "stale image-env temp cleanup failed"
+find "$STATE_DIR" -maxdepth 1 -type f -uid "$OWNER_UID" \( -name '.p1tmp.state.*' -o -name '.p1tmp.ledger.*' \) -mmin +1440 -delete || fail "stale state temp cleanup failed"
+find "$IMAGE_ENV_PARENT" -maxdepth 1 -type f -uid "$OWNER_UID" -name '.p1tmp.image-env.*' -mmin +1440 -delete || fail "stale image-env temp cleanup failed"
 
 CURRENT_IMAGE=""
 ROLLBACK_IMAGE=""
@@ -220,8 +232,8 @@ BLOCKED_IMAGE=""
 
 load_state() {
   if [[ -f "$STATE_FILE" ]]; then
-    require_root_file "$STATE_FILE"
-    # shellcheck disable=SC1090 -- generated by this root-owned script.
+    require_private_owner_file "$STATE_FILE"
+    # shellcheck disable=SC1090 -- generated by this owner-only script.
     source "$STATE_FILE"
   fi
   for value in "$CURRENT_IMAGE" "$ROLLBACK_IMAGE" "$SAFETY_IMAGE" "$PENDING_IMAGE" "$BLOCKED_IMAGE"; do
@@ -238,8 +250,7 @@ save_state() {
     printf 'PENDING_IMAGE=%q\n' "$PENDING_IMAGE"
     printf 'BLOCKED_IMAGE=%q\n' "$BLOCKED_IMAGE"
   } > "$ACTIVE_TMP"
-  chmod 0640 "$ACTIVE_TMP"
-  chown root:root "$ACTIVE_TMP"
+  chmod 0600 "$ACTIVE_TMP"
   mv -f -- "$ACTIVE_TMP" "$STATE_FILE"
   ACTIVE_TMP=""
 }
@@ -260,8 +271,7 @@ write_image_env() {
   validate_image_env_target "$IMAGE_ENV_PARENT" "$STAGING_IMAGE_ENV" || return 1
   ACTIVE_TMP="$(mktemp "$IMAGE_ENV_PARENT/.p1tmp.image-env.XXXXXX")" || return 1
   printf 'PROIZVODSTVO1_REACT_STAGING_IMAGE=%s\n' "$image" > "$ACTIVE_TMP" || { cleanup_active_tmp; return 1; }
-  chmod 0640 "$ACTIVE_TMP" || { cleanup_active_tmp; return 1; }
-  chown root:root "$ACTIVE_TMP" || { cleanup_active_tmp; return 1; }
+  chmod 0600 "$ACTIVE_TMP" || { cleanup_active_tmp; return 1; }
   mv -f -- "$ACTIVE_TMP" "$STAGING_IMAGE_ENV" || { cleanup_active_tmp; return 1; }
   ACTIVE_TMP=""
 }
@@ -336,12 +346,11 @@ append_ledger() {
   line="$(printf '%s\taction=%s\tstatus=%s\timage=%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$action" "$status" "$image")"
   ACTIVE_TMP="$(mktemp "$STATE_DIR/.p1tmp.ledger.XXXXXX")"
   if [[ -f "$LEDGER_FILE" ]]; then
-    require_root_file "$LEDGER_FILE"
+    require_private_owner_file "$LEDGER_FILE"
     tail -n 99 "$LEDGER_FILE" > "$ACTIVE_TMP"
   fi
   printf '%s\n' "$line" >> "$ACTIVE_TMP"
-  chmod 0640 "$ACTIVE_TMP"
-  chown root:root "$ACTIVE_TMP"
+  chmod 0600 "$ACTIVE_TMP"
   mv -f -- "$ACTIVE_TMP" "$LEDGER_FILE"
   ACTIVE_TMP=""
 }

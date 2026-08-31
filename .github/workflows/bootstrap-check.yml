@@ -300,15 +300,34 @@ jobs:
               raise SystemExit("pull failure must durably block candidate before deletion")
 
           private_config_tokens = (
-              "require_private_root_file",
+              'readonly CONFIG_FILE="/home/zavx0z/.p1-react-staging/config/deploy.env"',
+              'readonly OWNER_UID="$(id -u)"',
+              "require_owner_file",
+              "require_owner_dir",
+              "require_private_owner_file",
               '(8#$mode & 0077)',
-              'require_private_root_file "$DOCKER_CONFIG_DIR/config.json"',
+              'require_private_owner_file "$DOCKER_CONFIG_DIR/config.json"',
+              ': "${STAGING_OVERRIDE_FILE:?missing STAGING_OVERRIDE_FILE}"',
+              '-f "$STAGING_COMPOSE_FILE"',
+              '-f "$STAGING_OVERRIDE_FILE"',
+              'chmod 0600 "$ACTIVE_TMP"',
           )
           for token in private_config_tokens:
               if token not in wrapper:
                   raise SystemExit(f"missing private Docker config mode contract: {token}")
           if 'cat "$DOCKER_CONFIG_DIR/config.json"' in wrapper:
               raise SystemExit("Docker credential content must never be printed")
+          for forbidden_owner_token in (
+              "require_root_",
+              "chown root:root",
+              "-o root",
+              'CONFIG_FILE="/etc/',
+              "sudo ",
+          ):
+              if forbidden_owner_token in wrapper:
+                  raise SystemExit(
+                      f"root-scoped token remains in owner wrapper: {forbidden_owner_token}"
+                  )
 
           commit_block = wrapper[commit_start:rollback_start]
           durable_marker = commit_block.index("Durably commit the new ring before exact outgoing deletion")

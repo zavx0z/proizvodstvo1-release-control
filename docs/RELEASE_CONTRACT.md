@@ -263,10 +263,11 @@ finalize
 
 ## 10. Transactional VPS deployment
 
-The public workflow never has an arbitrary VPS shell. A dedicated SSH key is restricted to the reviewed root-owned wrapper:
+The public workflow never has an arbitrary VPS shell. A unique SSH key is
+restricted in the trusted `zavx0z` account to the reviewed owner-scoped wrapper:
 
 ```text
-ops/p1-react-staging-deploy.sh
+/home/zavx0z/.p1-react-staging/bin/p1-react-staging-deploy
 ```
 
 The wrapper owns only Compose project:
@@ -327,7 +328,7 @@ image-env=current, live=pending
 A missing portal fails closed. Commit saves the new ring and outgoing
 `BLOCKED_IMAGE` before deletion, then clears blocked state in a second save only
 after successful exact deletion. Image-env replacement uses a same-directory
-atomic `mv` after canonical root-owned non-symlink path checks.
+atomic `mv` after canonical current-user-owned non-symlink path checks.
 
 Normal deploy saves `PENDING_IMAGE=<candidate>` before `docker pull`. A crash
 during pull therefore leaves explicit recovery evidence. A reported pull
@@ -336,7 +337,8 @@ deletion; successful cleanup clears it in a second save, while failure returns
 `CLEANUP_BLOCKED`.
 
 The VPS pull-only Docker config is required to be regular, non-symlink,
-root-owned and private (`mode & 0077 == 0`). Its contents are never emitted.
+owned by the current `zavx0z` UID and private (`mode & 0077 == 0`). Its contents
+are never emitted.
 
 ## 11. Trusted full smoke
 
@@ -385,7 +387,9 @@ No broad Docker prune or Compose down is ever permitted.
 
 ## 13. External installation remains separate
 
-Credentials, package permissions and root-owned VPS installation are created only through a separate external Codex task after this control-code PR is reviewed and separately authorized for merge.
+Credentials, package permissions and owner-scoped VPS installation are created
+only through an explicitly authorized external launch task after this control
+code is reviewed and merged.
 
 Merging this maintenance PR alone creates no secrets, keys, GHCR package or VPS changes and does not trigger publication because `release/staging.json` is unchanged.
 

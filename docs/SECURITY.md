@@ -86,7 +86,10 @@ The source tree rejects Git symlinks/submodules before extraction.
 
 ### VPS key
 
-`P1_VPS_DEPLOY_KEY` authenticates only a dedicated staging deploy account. Its public key is restricted server-side to the fixed root-owned forced command documented in `ops/README.md`.
+`P1_VPS_DEPLOY_KEY` authenticates to the existing trusted operator account
+`zavx0z` through one unique authorized-key entry. `restrict` and an exact forced
+command permit only the reviewed owner-scoped wrapper documented in
+`ops/README.md`.
 
 Possession of this key must not allow:
 
@@ -112,8 +115,8 @@ bootstrap; normal publication stops with `GHCR_PACKAGE_ABSENT_BOOTSTRAP_REQUIRED
 The VPS uses a different pull-only GHCR credential stored only on the VPS. The public workflow never receives the VPS GHCR pull credential.
 
 The VPS Docker auth file is technically enforced as a regular non-symlink,
-root-owned file with no group/other mode bits (`mode & 0077 == 0`). Its parent
-remains root-owned and not group/other writable; credential content is never
+current-user-owned file with no group/other mode bits (`mode & 0077 == 0`). Its
+parent remains owner-only and not group/other writable; credential content is never
 printed.
 
 ## Secret separation by job
@@ -199,7 +202,7 @@ The candidate remains under the normal 48-hour cleanup grace window and does not
 
 ## Transactional deployment
 
-A normal manifest push uses the root-owned wrapper transaction:
+A normal manifest push uses the reviewed owner-scoped wrapper transaction:
 
 ```text
 deploy IMAGE
@@ -228,8 +231,14 @@ ledger records `recovery-required`, and the wrapper returns
 `PENDING_RECOVERY_REQUIRED`.
 
 Ring commit saves the new ring and outgoing `BLOCKED_IMAGE` before exact image
-deletion. `STAGING_IMAGE_ENV` is atomically replaced by a root-owned
+deletion. `STAGING_IMAGE_ENV` is atomically replaced by an owner-only
 `.p1tmp.image-env.*` file created in the same canonical, non-symlink directory.
+
+The accepted staging risk is explicit: `zavx0z` already has root-equivalent
+Docker access and can modify its own wrapper/config/authorized keys. The forced
+entry isolates compromise of the deployment key to the wrapper grammar, but a
+full compromise of the trusted host account compromises staging. Production,
+Artel and ingress remain outside the wrapper command surface.
 
 A repeated publication of the already-current immutable digest is treated as a no-op transaction and does not duplicate or corrupt the rollback/safety ring.
 
