@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "1e84429f86155efe9958c6bcf428dcfc1241580c",
-  "sequence": 4,
-  "requested_at": "2026-08-31T11:04:00Z",
-  "summary": "Restore original isometric React homepage map"
+  "source_sha": "ad6304666276c64d368918216b8f65061b5d39c7",
+  "sequence": 5,
+  "requested_at": "2026-08-31T11:39:52Z",
+  "summary": "Fix React staging missing static image assets"
 }
