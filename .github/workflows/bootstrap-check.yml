@@ -245,6 +245,8 @@ jobs:
               raise SystemExit("raw private runtime logs remain public")
           if "source snapshot rejects symlink/submodule entry:" in publish:
               raise SystemExit("private source-tree rejection still prints a path")
+          if "python3 - <<'PY'" in source_step:
+              raise SystemExit("private source preparation must not use an indented heredoc")
           if publish.count("_LOG_BYTES=") < 4 or publish.count("_LOG_SHA256=") < 4:
               raise SystemExit("private diagnostic logs must expose hash/byte evidence only")
 
