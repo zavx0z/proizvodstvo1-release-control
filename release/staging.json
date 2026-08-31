@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "364563a2c9424338b09629bd5a525c10826045e1",
-  "sequence": 2,
-  "requested_at": "2026-08-31T09:10:06Z",
-  "summary": "Migrate current React staging release to private GHCR"
+  "source_sha": "3aa1a8ce921b2748cb2d57cbc7537b691569f394",
+  "sequence": 3,
+  "requested_at": "2026-08-31T10:42:23Z",
+  "summary": "Fix missing React staging home background asset"
 }
