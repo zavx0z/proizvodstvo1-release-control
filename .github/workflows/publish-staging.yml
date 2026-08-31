@@ -266,18 +266,7 @@ jobs:
                 --source-dir source-checkout
             fi
 
-            python3 - <<'PY'
-            import subprocess
-            entries = subprocess.check_output(
-                ["git", "-C", "source-checkout", "ls-tree", "-r", "HEAD"],
-                text=True,
-            )
-            for line in entries.splitlines():
-                meta, _path = line.split("\t", 1)
-                mode, kind, _sha = meta.split()
-                if mode in {"120000", "160000"} or kind != "blob":
-                    raise SystemExit("PRIVATE_SOURCE_TREE_UNSUPPORTED_ENTRY")
-            PY
+            python3 -c 'import subprocess, sys; entries = subprocess.check_output(["git", "-C", "source-checkout", "ls-tree", "-r", "HEAD"], text=True).splitlines(); unsupported = any((fields := line.split("\t", 1)[0].split())[0] in {"120000", "160000"} or fields[1] != "blob" for line in entries); sys.exit("PRIVATE_SOURCE_TREE_UNSUPPORTED_ENTRY" if unsupported else 0)'
 
             archive="$RUNNER_TEMP/p1-source.tar"
             git -C source-checkout archive --format=tar --output="$archive" HEAD
