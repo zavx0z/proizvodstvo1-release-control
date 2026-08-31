@@ -2,20 +2,22 @@
 
 This directory contains reviewed source for the one external host-side command used by the public release-control workflow.
 
-The repository file is never executed directly from a mutable checkout on the VPS. Codex installs an exact reviewed copy as a root-owned file, for example:
+The repository file is never executed directly from a mutable checkout on the
+VPS. The accepted staging model installs an exact reviewed owner-only copy:
 
 ```text
-/usr/local/sbin/p1-react-staging-deploy
+/home/zavx0z/.p1-react-staging/bin/p1-react-staging-deploy
 ```
 
 and records its SHA-256 in the installation report.
 
 ## Forced SSH command
 
-The dedicated deployment SSH account has no interactive shell, no PTY, no forwarding and no arbitrary sudo. Its authorized key is restricted to a forced command equivalent to:
+One unique key in the existing trusted `zavx0z` account has no interactive
+shell, PTY, forwarding or user rc. Its authorized-key options are equivalent to:
 
 ```text
-sudo -n /usr/local/sbin/p1-react-staging-deploy
+restrict,command="/home/zavx0z/.p1-react-staging/bin/p1-react-staging-deploy"
 ```
 
 The wrapper itself reads `SSH_ORIGINAL_COMMAND` and accepts only:
@@ -29,37 +31,40 @@ rollback <current committed Proizvodstvo1 React staging image>
 
 No path, Compose project, service name or arbitrary command is accepted from SSH.
 
-## Root-owned configuration
+## Owner-scoped configuration
 
-Install `/etc/p1-react-staging/deploy.env` as root:root and non-group/other-writable. It contains no GitHub workflow-controlled paths.
+Install `/home/zavx0z/.p1-react-staging/config/deploy.env` owner-only mode 0600.
+The whole `.p1-react-staging` tree and its `bin`, `config`, and `state`
+directories are mode 0700; wrapper mode is 0500.
 
 Required values:
 
 ```text
-STAGING_COMPOSE_FILE=/absolute/path/to/fixed/staging-compose.yml
-STAGING_RUNTIME_ENV=/absolute/path/to/fixed/staging-runtime.env
-STAGING_IMAGE_ENV=/absolute/path/to/fixed/staging-image.env
-STATE_DIR=/var/lib/p1-react-staging
-DOCKER_CONFIG_DIR=/etc/p1-react-staging/ghcr-pull
+STAGING_COMPOSE_FILE=/home/zavx0z/proizvodstvo1-react-staging.compose.yaml
+STAGING_OVERRIDE_FILE=/home/zavx0z/proizvodstvo1-react-staging.override.yaml
+STAGING_RUNTIME_ENV=/home/zavx0z/proizvodstvo1-react-staging.env
+STAGING_IMAGE_ENV=/home/zavx0z/.p1-react-staging/config/staging-image.env
+STATE_DIR=/home/zavx0z/.p1-react-staging/state
+DOCKER_CONFIG_DIR=/home/zavx0z/.p1-react-staging/config/docker
 PORTAL_SERVICE=portal
-NGINX_SERVICE=<actual fixed staging Nginx service name>
-MIN_FREE_KB=<minimum free disk in KiB, at least 1048576>
+NGINX_SERVICE=project-nginx
+MIN_FREE_KB=1048576
 EXTERNAL_HEALTH_URL=https://staging.proizvodstvo1.ru/health
 ```
 
 `DOCKER_CONFIG_DIR/config.json` contains a pull-only GHCR credential for only the private `proizvodstvo1-react-portal` package. Credential material is not committed or printed.
 
-The wrapper enforces that this file is regular, non-symlink, root-owned and has
-no group/other permissions (`mode & 0077 == 0`). Its parent remains root-owned
-and not group/other writable.
+The wrapper enforces that this file is regular, non-symlink, owned by the current
+UID and has no group/other permissions (`mode & 0077 == 0`). Its parent is
+owner-only and not group/other writable.
 
-`STAGING_IMAGE_ENV` is a root-owned one-line file:
+`STAGING_IMAGE_ENV` is an owner-only mode-0600 one-line file:
 
 ```text
 PROIZVODSTVO1_REACT_STAGING_IMAGE=<immutable image ref>
 ```
 
-The target and canonical parent must be real root-owned paths without
+The target and canonical parent must be real current-user-owned paths without
 group/other write permission. Updates use `.p1tmp.image-env.*` in that same
 parent followed by atomic `mv`; symlink targets and parents are rejected.
 
