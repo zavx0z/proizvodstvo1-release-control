@@ -44,11 +44,11 @@ jobs:
             https://staging.proizvodstvo1.ru/health > "$tmp/health.json"
 
           echo 'PRODUCTION_HOME_REFERENCES_BEGIN'
-          grep -Eo '/assets/[^"'"' ]*(home-bg|cover)[^"'"' ]*' "$tmp/production.html" | sort -u || true
+          grep -Eo '/assets/[^\"]*(home-bg|cover)[^\"]*' "$tmp/production.html" | sort -u || true
           echo 'PRODUCTION_HOME_REFERENCES_END'
 
           echo 'STAGING_HOME_REFERENCES_BEGIN'
-          grep -Eo '/assets/[^"'"' ]*(home-bg|cover)[^"'"' ]*' "$tmp/staging.html" | sort -u || true
+          grep -Eo '/assets/[^\"]*(home-bg|cover)[^\"]*' "$tmp/staging.html" | sort -u || true
           echo 'STAGING_HOME_REFERENCES_END'
 
           printf 'STAGING_HEALTH='
