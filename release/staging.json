@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "c20300d03f05b25ce92920b6081a0414c03fffd9",
-  "sequence": 6,
-  "requested_at": "2026-08-31T12:05:00Z",
-  "summary": "Use working production image URLs on React staging"
+  "source_sha": "e8896467b5b847f06cdf2031df6c52a4df0c62bc",
+  "sequence": 7,
+  "requested_at": "2026-08-31T13:40:00Z",
+  "summary": "Expose the Institute as a full portal section"
 }
