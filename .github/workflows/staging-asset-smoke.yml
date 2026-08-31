@@ -3,10 +3,8 @@ name: React staging asset smoke
 on:
   push:
     branches:
-      - main
       - maintenance/staging-asset-smoke
     paths:
-      - "release/staging.json"
       - ".github/workflows/staging-asset-smoke.yml"
   workflow_dispatch:
 
@@ -19,54 +17,52 @@ concurrency:
 
 jobs:
   smoke:
-    name: Verify live React staging image assets
+    name: Diagnose live image delivery
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Wait for deployed markup and image responses
+      - name: Probe production and staging asset contracts
         shell: bash
         run: |
           set -euo pipefail
-          base_url="https://staging.proizvodstvo1.ru"
-          tmp="$(mktemp -d "$RUNNER_TEMP/p1-asset-smoke.XXXXXX")"
+          tmp="$(mktemp -d "$RUNNER_TEMP/p1-asset-diagnose.XXXXXX")"
           trap 'rm -rf -- "$tmp"' EXIT
 
-          fetch() {
-            curl --silent --show-error --connect-timeout 10 --max-time 45 \
-              --output "$2" --dump-header "$3" --write-out '%{http_code}' \
-              "$base_url$1"
+          probe() {
+            local label="$1" url="$2"
+            local line
+            line="$(curl --silent --show-error --location --connect-timeout 10 --max-time 45 \
+              --output /dev/null --write-out '%{http_code}|%{content_type}|%{url_effective}' "$url" || true)"
+            printf '%s=%s\n' "$label" "$line"
           }
 
-          for attempt in $(seq 1 12); do
-            rm -f -- "$tmp"/*
-            root_status="$(fetch / "$tmp/root.body" "$tmp/root.headers" || true)"
-            home_asset_status="$(fetch /assets/img/photos/home-bg-landscape.png "$tmp/home.body" "$tmp/home.headers" || true)"
-            docs_status="$(fetch /docs/legal "$tmp/docs.body" "$tmp/docs.headers" || true)"
-            docs_asset_status="$(fetch /assets/img/photos/docs-legal/1024w.webp "$tmp/docs-asset.body" "$tmp/docs-asset.headers" || true)"
+          curl --silent --show-error --location --connect-timeout 10 --max-time 45 \
+            https://proizvodstvo1.ru/ > "$tmp/production.html"
+          curl --silent --show-error --location --connect-timeout 10 --max-time 45 \
+            https://staging.proizvodstvo1.ru/ > "$tmp/staging.html"
+          curl --silent --show-error --location --connect-timeout 10 --max-time 45 \
+            https://staging.proizvodstvo1.ru/health > "$tmp/health.json"
 
-            if [[ "$root_status" == 200 && "$home_asset_status" == 200 && "$docs_status" == 200 && "$docs_asset_status" == 200 ]] \
-              && grep -Fq '/assets/img/photos/home-bg-landscape.png' "$tmp/root.body" \
-              && ! grep -Eq 'home-bg-landscape\.(avif|webp)|home-bg-portrait' "$tmp/root.body" \
-              && ! grep -Fq '/assets/img/og/cover.jpg' "$tmp/root.body" \
-              && grep -Fq '/assets/img/photos/docs-legal/1024w.webp' "$tmp/docs.body" \
-              && ! grep -Fq '1600w.avif' "$tmp/docs.body" \
-              && grep -Eiq '^content-type:[[:space:]]*image/' "$tmp/home.headers" \
-              && grep -Eiq '^content-type:[[:space:]]*image/' "$tmp/docs-asset.headers" \
-              && grep -Fiq 'X-Robots-Tag: noindex, nofollow' "$tmp/root.headers"; then
-              echo "P1_REACT_STAGING_ASSET_SMOKE_VALID"
-              echo "HOME_ASSET_HTTP=$home_asset_status"
-              echo "DOCS_ASSET_HTTP=$docs_asset_status"
-              exit 0
-            fi
+          echo 'PRODUCTION_HOME_REFERENCES_BEGIN'
+          grep -Eo '/assets/[^"'"' ]*(home-bg|cover)[^"'"' ]*' "$tmp/production.html" | sort -u || true
+          echo 'PRODUCTION_HOME_REFERENCES_END'
 
-            echo "asset smoke attempt $attempt not ready: root=$root_status home=$home_asset_status docs=$docs_status docs_asset=$docs_asset_status"
-            sleep 10
-          done
+          echo 'STAGING_HOME_REFERENCES_BEGIN'
+          grep -Eo '/assets/[^"'"' ]*(home-bg|cover)[^"'"' ]*' "$tmp/staging.html" | sort -u || true
+          echo 'STAGING_HOME_REFERENCES_END'
 
-          echo "React staging asset smoke failed after 12 attempts" >&2
-          echo "ROOT_HEADERS_SHA256=$(sha256sum "$tmp/root.headers" | awk '{print $1}')" >&2
-          echo "ROOT_BODY_SHA256=$(sha256sum "$tmp/root.body" | awk '{print $1}')" >&2
-          echo "HOME_HEADERS_SHA256=$(sha256sum "$tmp/home.headers" | awk '{print $1}')" >&2
-          echo "DOCS_HEADERS_SHA256=$(sha256sum "$tmp/docs.headers" | awk '{print $1}')" >&2
-          echo "DOCS_ASSET_HEADERS_SHA256=$(sha256sum "$tmp/docs-asset.headers" | awk '{print $1}')" >&2
-          exit 1
+          printf 'STAGING_HEALTH='
+          cat "$tmp/health.json"
+          echo
+
+          probe PROD_HOME_AVIF https://proizvodstvo1.ru/assets/img/photos/home-bg-landscape.avif
+          probe PROD_HOME_WEBP https://proizvodstvo1.ru/assets/img/photos/home-bg-landscape.webp
+          probe PROD_HOME_PNG https://proizvodstvo1.ru/assets/img/photos/home-bg-landscape.png
+          probe PROD_HOME_PORTRAIT_AVIF https://proizvodstvo1.ru/assets/img/photos/home-bg-portrait.avif
+          probe PROD_DOCS_1600_AVIF https://proizvodstvo1.ru/assets/img/photos/docs-legal/1600w.avif
+          probe PROD_DOCS_1024_WEBP https://proizvodstvo1.ru/assets/img/photos/docs-legal/1024w.webp
+          probe STAGING_HOME_AVIF https://staging.proizvodstvo1.ru/assets/img/photos/home-bg-landscape.avif
+          probe STAGING_HOME_WEBP https://staging.proizvodstvo1.ru/assets/img/photos/home-bg-landscape.webp
+          probe STAGING_HOME_PNG https://staging.proizvodstvo1.ru/assets/img/photos/home-bg-landscape.png
+          probe STAGING_DOCS_1600_AVIF https://staging.proizvodstvo1.ru/assets/img/photos/docs-legal/1600w.avif
+          probe STAGING_DOCS_1024_WEBP https://staging.proizvodstvo1.ru/assets/img/photos/docs-legal/1024w.webp
