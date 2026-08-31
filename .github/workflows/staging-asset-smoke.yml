@@ -17,52 +17,83 @@ concurrency:
 
 jobs:
   smoke:
-    name: Diagnose live image delivery
+    name: Verify live production image URLs
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Probe production and staging asset contracts
+      - name: Verify live React staging markup and images
         shell: bash
         run: |
           set -euo pipefail
-          tmp="$(mktemp -d "$RUNNER_TEMP/p1-asset-diagnose.XXXXXX")"
-          trap 'rm -rf -- "$tmp"' EXIT
+          python3 - <<'PY'
+          import json
+          import time
+          import urllib.request
 
-          probe() {
-            local label="$1" url="$2"
-            local line
-            line="$(curl --silent --show-error --location --connect-timeout 10 --max-time 45 \
-              --output /dev/null --write-out '%{http_code}|%{content_type}|%{url_effective}' "$url" || true)"
-            printf '%s=%s\n' "$label" "$line"
-          }
+          STAGING = "https://staging.proizvodstvo1.ru"
+          PRODUCTION = "https://proizvodstvo1.ru"
+          HOME_URLS = [
+              f"{PRODUCTION}/assets/img/photos/home-bg-landscape.avif",
+              f"{PRODUCTION}/assets/img/photos/home-bg-landscape.webp",
+              f"{PRODUCTION}/assets/img/photos/home-bg-landscape.png",
+              f"{PRODUCTION}/assets/img/photos/home-bg-portrait.avif",
+              f"{PRODUCTION}/assets/img/photos/home-bg-portrait.webp",
+          ]
+          DOC_URLS = [
+              f"{PRODUCTION}/assets/img/photos/docs-legal/640w.avif",
+              f"{PRODUCTION}/assets/img/photos/docs-legal/1024w.avif",
+              f"{PRODUCTION}/assets/img/photos/docs-legal/1600w.avif",
+              f"{PRODUCTION}/assets/img/photos/docs-legal/640w.webp",
+              f"{PRODUCTION}/assets/img/photos/docs-legal/1024w.webp",
+              f"{PRODUCTION}/assets/img/photos/docs-legal/1600w.webp",
+          ]
 
-          curl --silent --show-error --location --connect-timeout 10 --max-time 45 \
-            https://proizvodstvo1.ru/ > "$tmp/production.html"
-          curl --silent --show-error --location --connect-timeout 10 --max-time 45 \
-            https://staging.proizvodstvo1.ru/ > "$tmp/staging.html"
-          curl --silent --show-error --location --connect-timeout 10 --max-time 45 \
-            https://staging.proizvodstvo1.ru/health > "$tmp/health.json"
+          def fetch(url: str):
+              request = urllib.request.Request(url, headers={"User-Agent": "p1-staging-asset-smoke/1"})
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  return response.status, response.headers, response.read()
 
-          echo 'PRODUCTION_HOME_REFERENCES_BEGIN'
-          grep -Eo '/assets/[^\"]*(home-bg|cover)[^\"]*' "$tmp/production.html" | sort -u || true
-          echo 'PRODUCTION_HOME_REFERENCES_END'
+          last_error = "not started"
+          for attempt in range(1, 13):
+              try:
+                  root_status, root_headers, root_body = fetch(f"{STAGING}/")
+                  docs_status, _, docs_body = fetch(f"{STAGING}/docs/legal")
+                  health_status, _, health_body = fetch(f"{STAGING}/health")
+                  root = root_body.decode("utf-8")
+                  docs = docs_body.decode("utf-8")
+                  health = json.loads(health_body.decode("utf-8"))
 
-          echo 'STAGING_HOME_REFERENCES_BEGIN'
-          grep -Eo '/assets/[^\"]*(home-bg|cover)[^\"]*' "$tmp/staging.html" | sort -u || true
-          echo 'STAGING_HOME_REFERENCES_END'
+                  assert root_status == 200
+                  assert docs_status == 200
+                  assert health_status == 200
+                  assert health.get("status") == "ok"
+                  assert health.get("seoIndexable") is False
+                  assert "noindex, nofollow" in root_headers.get("X-Robots-Tag", "").lower()
 
-          printf 'STAGING_HEALTH='
-          cat "$tmp/health.json"
-          echo
+                  for url in HOME_URLS:
+                      assert url in root, f"homepage missing {url}"
+                  assert '"/assets/img/photos/home-bg' not in root
 
-          probe PROD_HOME_AVIF https://proizvodstvo1.ru/assets/img/photos/home-bg-landscape.avif
-          probe PROD_HOME_WEBP https://proizvodstvo1.ru/assets/img/photos/home-bg-landscape.webp
-          probe PROD_HOME_PNG https://proizvodstvo1.ru/assets/img/photos/home-bg-landscape.png
-          probe PROD_HOME_PORTRAIT_AVIF https://proizvodstvo1.ru/assets/img/photos/home-bg-portrait.avif
-          probe PROD_DOCS_1600_AVIF https://proizvodstvo1.ru/assets/img/photos/docs-legal/1600w.avif
-          probe PROD_DOCS_1024_WEBP https://proizvodstvo1.ru/assets/img/photos/docs-legal/1024w.webp
-          probe STAGING_HOME_AVIF https://staging.proizvodstvo1.ru/assets/img/photos/home-bg-landscape.avif
-          probe STAGING_HOME_WEBP https://staging.proizvodstvo1.ru/assets/img/photos/home-bg-landscape.webp
-          probe STAGING_HOME_PNG https://staging.proizvodstvo1.ru/assets/img/photos/home-bg-landscape.png
-          probe STAGING_DOCS_1600_AVIF https://staging.proizvodstvo1.ru/assets/img/photos/docs-legal/1600w.avif
-          probe STAGING_DOCS_1024_WEBP https://staging.proizvodstvo1.ru/assets/img/photos/docs-legal/1024w.webp
+                  for url in DOC_URLS:
+                      assert url in docs, f"docs page missing {url}"
+                  assert '"/assets/img/photos/docs-legal/' not in docs
+
+                  for url in HOME_URLS + DOC_URLS:
+                      status, headers, body = fetch(url)
+                      content_type = headers.get_content_type()
+                      assert status == 200, f"{url} returned {status}"
+                      assert content_type.startswith("image/"), f"{url} returned {content_type}"
+                      assert body, f"{url} returned an empty body"
+
+                  print("P1_REACT_STAGING_PRODUCTION_ASSET_URLS_VALID")
+                  print(f"HOME_URLS_OK={len(HOME_URLS)}")
+                  print(f"DOC_URLS_OK={len(DOC_URLS)}")
+                  print("RELATIVE_BROKEN_URLS_IN_MARKUP=false")
+                  raise SystemExit(0)
+              except Exception as exc:
+                  last_error = f"attempt {attempt}: {exc}"
+                  print(last_error)
+                  time.sleep(10)
+
+          raise SystemExit(f"React staging production-asset smoke failed: {last_error}")
+          PY
