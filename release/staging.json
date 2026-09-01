@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "e8896467b5b847f06cdf2031df6c52a4df0c62bc",
-  "sequence": 7,
-  "requested_at": "2026-08-31T13:40:00Z",
-  "summary": "Expose the Institute as a full portal section"
+  "source_sha": "fbc3885d150120628c676378989ec906a4f3643a",
+  "sequence": 8,
+  "requested_at": "2026-09-01T07:15:38Z",
+  "summary": "Publish consolidated Institute research and VIDNAL engineering nodes"
 }
