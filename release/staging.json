@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "79d3c154a0d87f4cfd2bbf543404514b09085fe7",
-  "sequence": 9,
-  "requested_at": "2026-09-01T07:44:00Z",
-  "summary": "Fix staging React asset cache and responsive menu"
+  "source_sha": "352e051e4647038c11b1c755f9c03244715e8c55",
+  "sequence": 10,
+  "requested_at": "2026-09-01T07:53:00Z",
+  "summary": "Publish VIDNAL F50 transom research on cache-safe React staging"
 }
