@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "352e051e4647038c11b1c755f9c03244715e8c55",
-  "sequence": 10,
-  "requested_at": "2026-09-01T07:53:00Z",
-  "summary": "Publish VIDNAL F50 transom research on cache-safe React staging"
+  "source_sha": "75d242460ac098b6229d8a574b5683261a495466",
+  "sequence": 11,
+  "requested_at": "2026-09-05T20:54:07Z",
+  "summary": "Publish consolidated Institute research and verified responsive portal from all pending pull requests"
 }
