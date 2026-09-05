@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "b919f002c60d35c54f0ceba18723144890b1565d",
-  "sequence": 13,
-  "requested_at": "2026-09-05T22:31:03Z",
-  "summary": "Publish final accepted project state with strengthened live source identity checks"
+  "source_sha": "8d0532d8dbb2fbf571024f3cd68051e2794f1372",
+  "sequence": 14,
+  "requested_at": "2026-09-05T22:46:00Z",
+  "summary": "Publish the additional reviewed research delta from the final open pull request"
 }
