@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "75d242460ac098b6229d8a574b5683261a495466",
-  "sequence": 11,
-  "requested_at": "2026-09-05T20:54:07Z",
-  "summary": "Publish consolidated Institute research and verified responsive portal from all pending pull requests"
+  "source_sha": "29eb93ff1c193d75450359f78cc61a1b529852db",
+  "sequence": 12,
+  "requested_at": "2026-09-05T22:00:00Z",
+  "summary": "Publish final reviewed research delta on the verified Institute portal"
 }
