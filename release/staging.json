@@ -4,7 +4,7 @@
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
   "source_sha": "8d0532d8dbb2fbf571024f3cd68051e2794f1372",
-  "sequence": 14,
-  "requested_at": "2026-09-05T22:46:00Z",
-  "summary": "Publish the additional reviewed research delta from the final open pull request"
+  "sequence": 15,
+  "requested_at": "2026-09-09T02:43:03Z",
+  "summary": "Owner-requested staging refresh of the current accepted ai-dev revision; no source changes"
 }
