@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "8d0532d8dbb2fbf571024f3cd68051e2794f1372",
-  "sequence": 15,
-  "requested_at": "2026-09-09T02:43:03Z",
-  "summary": "Owner-requested staging refresh of the current accepted ai-dev revision; no source changes"
+  "source_sha": "c36bd80268d796cc186fbf6c9ebc9098e45959c2",
+  "sequence": 16,
+  "requested_at": "2026-09-09T02:59:45Z",
+  "summary": "Publish reviewed application updates from the accepted staging source"
 }
