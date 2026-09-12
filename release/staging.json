@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "c36bd80268d796cc186fbf6c9ebc9098e45959c2",
-  "sequence": 16,
-  "requested_at": "2026-09-09T02:59:45Z",
-  "summary": "Publish reviewed application updates from the accepted staging source"
+  "source_sha": "b70012bcd484690c38926e6c8b71d2b5dcd5a7de",
+  "sequence": 17,
+  "requested_at": "2026-09-12T13:20:31Z",
+  "summary": "Publish reviewed Institute interface and server-backed glass preview from accepted staging source"
 }
