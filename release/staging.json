@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "e64f693567631e02ec0640edb57dc650090f9afa",
-  "sequence": 18,
-  "requested_at": "2026-09-12T13:37:25Z",
-  "summary": "Publish the final accepted source including reconciled release documentation and work graph"
+  "source_sha": "69fd65d73c73ec71509cfd190b46aade04cde289",
+  "sequence": 19,
+  "requested_at": "2026-09-13T15:45:30Z",
+  "summary": "Publish Institute calculator v2 with manufacturer and readiness flow"
 }
