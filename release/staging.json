@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "69fd65d73c73ec71509cfd190b46aade04cde289",
-  "sequence": 19,
-  "requested_at": "2026-09-13T15:45:30Z",
-  "summary": "Publish Institute calculator v2 with manufacturer and readiness flow"
+  "source_sha": "79dba321b4249411bdc360df7f4072eaaaae7d53",
+  "sequence": 20,
+  "requested_at": "2026-09-14T19:33:33Z",
+  "summary": "Publish unified Institute manufacturer and catalogue selection without prices"
 }
