@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "37a350621b41a88ad477a1fac6f20a896f02acb2",
-  "sequence": 21,
-  "requested_at": "2026-09-15T11:12:11Z",
-  "summary": "Publish reviewed catalogue transport reliability and explicit cache-free CI corrections"
+  "source_sha": "bb724a8dae08aa3e2524fa855c687c3433948f24",
+  "sequence": 22,
+  "requested_at": "2026-09-20T05:05:00Z",
+  "summary": "Publish four-manufacturer Institute depth contract and server-side construction selector"
 }
