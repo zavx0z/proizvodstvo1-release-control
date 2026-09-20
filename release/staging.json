@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "73d8d53cf2d440afee5340656c29b54b15f66612",
-  "sequence": 23,
-  "requested_at": "2026-09-20T09:17:00Z",
-  "summary": "Publish selector v2, KRAUSS source-contour closeout and ALUMARK reconciliation"
+  "source_sha": "829def51e8e14f6b98fe1c42f6b2851c761cd6a8",
+  "sequence": 24,
+  "requested_at": "2026-09-20T11:04:16Z",
+  "summary": "Publish reviewed engineering chain and stale-response-safe four-brand selector"
 }
