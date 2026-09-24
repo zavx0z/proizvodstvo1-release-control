@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "62115c5df1fe2c4cd021076685741b1750a9794a",
-  "sequence": 27,
-  "requested_at": "2026-09-24T18:36:38Z",
-  "summary": "Serve React portal photos from its own immutable image"
+  "source_sha": "b504c727fa22e46f7d9c89d3f10369851650fc5b",
+  "sequence": 28,
+  "requested_at": "2026-09-24T22:36:46Z",
+  "summary": "Clarify Institute UX, compact catalogue and mobile controls"
 }
