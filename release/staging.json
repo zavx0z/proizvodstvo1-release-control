@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "829def51e8e14f6b98fe1c42f6b2851c761cd6a8",
-  "sequence": 24,
-  "requested_at": "2026-09-20T11:04:16Z",
-  "summary": "Publish reviewed engineering chain and stale-response-safe four-brand selector"
+  "source_sha": "708f70481cf1a2e1d9dc8ca3746cdca2b319c61f",
+  "sequence": 25,
+  "requested_at": "2026-09-24T07:21:50Z",
+  "summary": "Publish Institute product UX and accepted ai-dev engineering updates"
 }
