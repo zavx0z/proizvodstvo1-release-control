@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "708f70481cf1a2e1d9dc8ca3746cdca2b319c61f",
-  "sequence": 25,
-  "requested_at": "2026-09-24T07:21:50Z",
-  "summary": "Publish Institute product UX and accepted ai-dev engineering updates"
+  "source_sha": "303cbb43467e690bcbca86ddb98e15dcaa0bf729",
+  "sequence": 26,
+  "requested_at": "2026-09-24T14:43:38Z",
+  "summary": "Correct Institute visual hierarchy after owner review"
 }
