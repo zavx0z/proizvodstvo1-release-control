@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "b504c727fa22e46f7d9c89d3f10369851650fc5b",
-  "sequence": 28,
-  "requested_at": "2026-09-24T22:36:46Z",
-  "summary": "Clarify Institute UX, compact catalogue and mobile controls"
+  "source_sha": "d32c0fff145390533672064717d6309702969d9c",
+  "sequence": 29,
+  "requested_at": "2026-09-24T22:58:41Z",
+  "summary": "Recover release gate and publish Institute product UX"
 }
