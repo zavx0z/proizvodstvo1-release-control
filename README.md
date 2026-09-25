@@ -1,5 +1,5 @@
 # proizvodstvo1-release-control
 
-This public repository records the last React staging release of Производство №1. GitHub Actions were disabled on 25.09.2026; the manifest in `release/staging.json` no longer triggers a build or deployment. The published staging portal remains online at its last committed image.
+This public repository records React staging release manifests for Производство №1. GitHub Actions were disabled on 25.09.2026; a manifest change does not trigger a build or deployment.
 
-`docs/CURRENT_STATE.md` records the last release identity and the current pause. Existing `scripts/` and `ops/p1-react-staging-deploy.sh` are retained as technical source, not an active publication workflow. Source verification now runs locally in `zavx0z/proizvodstvo1` with `bun run local:check`. A separate local deployment process has not yet been established.
+`docs/CURRENT_STATE.md` records the current manually published release, its source commit, image digest, rollback state, and verification. Source checks run locally in `zavx0z/proizvodstvo1` with `bun run local:check`. The existing restricted VPS wrapper remains the staging deployment mechanism; there is no automated publish job.
