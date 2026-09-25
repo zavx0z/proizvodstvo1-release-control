@@ -3,8 +3,8 @@
   "environment": "staging",
   "source_repository": "zavx0z/proizvodstvo1",
   "source_ref": "refs/heads/ai-dev",
-  "source_sha": "d32c0fff145390533672064717d6309702969d9c",
-  "sequence": 29,
-  "requested_at": "2026-09-24T22:58:41Z",
-  "summary": "Recover release gate and publish Institute product UX"
+  "source_sha": "56c5682f949b11405ea9d9d8f1716f6a6305b5d6",
+  "sequence": 30,
+  "requested_at": "2026-09-25T04:57:40Z",
+  "summary": "Locally verified ai-dev release of current Institute to React staging"
 }
